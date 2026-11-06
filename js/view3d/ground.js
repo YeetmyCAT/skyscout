@@ -27,7 +27,8 @@ export function terrainMaterial(U, albedo, opts = {}) {
         float lum = dot(alb, vec3(0.3, 0.59, 0.11));
         float green = clamp((alb.g - max(alb.r, alb.b))*8.0 + 0.3, 0.0, 1.0);
         float forest = smoothstep(0.05, 0.02, lum) * green;
-        float water = smoothstep(0.0, 0.02, alb.b - alb.g*0.95) * smoothstep(0.08, 0.02, lum);
+        // water in the aerial photo: dark, blue-leaning, and dead flat
+        float water = smoothstep(0.0, 0.02, alb.b - alb.g*0.9 + 0.01) * smoothstep(0.09, 0.03, lum) * smoothstep(0.996, 0.9995, n.y);
         // fine procedural variation so close ground is not a blurry photo
         float nz = fbm2(vW.xz*0.35) * 0.35 + fbm2(vW.xz*3.0)*0.15;
         alb *= 0.8 + nz;
@@ -47,7 +48,9 @@ export function terrainMaterial(U, albedo, opts = {}) {
           if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) col += alb/PI * texture(uLightMap, luv).rgb * 40.0 * uExposure * uNight;
         }
         // specular sheen on wet ground / water from the sky
-        col += (uWet*0.08 + water*0.25) * hazeL(reflect(normalize(vW - cameraPosition), n)) * pow(1.0 - max(dot(-normalize(vW - cameraPosition), n), 0.0), 3.0);
+        col += uWet*0.08 * hazeL(reflect(normalize(vW - cameraPosition), n)) * pow(1.0 - max(dot(-normalize(vW - cameraPosition), n), 0.0), 3.0);
+        float iced = smoothstep(0.6, 0.9, uSnow);   // snow on ice hides frozen water
+        col = mix(col, waterShade(vW, 0.35), water*(1.0 - iced));
         col += vec3(0.85,0.88,1.0)*uFlash.w*0.02*alb * exp(-length(vW - uFlash.xyz)/8000.0);
         col = aerial(col, normalize(vW - cameraPosition), length(vW - cameraPosition));
         gl_FragColor = vec4(col, 1.0);
@@ -247,7 +250,7 @@ export function distantLights(U, lights, local, heightAt, excludeHalf, mobile) {
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
-        vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r>1.0) discard; gl_FragColor = vec4(vC*exp(-r*3.0), 1.0); }`,
+        vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r>1.0) discard; gl_FragColor = vec4(min(vC*exp(-r*3.0), vec3(3.0e4)), 1.0); }`,
   });
   const pts = new THREE.Points(g, mat); pts.frustumCulled = false;
   return pts;

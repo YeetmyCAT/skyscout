@@ -196,3 +196,13 @@ export async function domeNames(L, lat, lon) {
   }
   return out;
 }
+
+// Scale the whole-sky model so its zenith matches the light pollution atlas (keeps the model's horizon shape).
+export function calibrateToAtlas(lp, atlas, snow = 0) {
+  if (!lp || !atlas || !(lp.zenith > 0)) return lp;
+  const target = atlas.ratio * NAT_SKY * (1 + 1.5 * snow);
+  const k = Math.max(1e-3, Math.min(1e3, target / lp.zenith));
+  lp.clear = lp.clear.map(v => v * k); lp.cloud = lp.cloud.map(v => v * k);
+  lp.horizon = lp.horizon.map(v => v * k); lp.zenith *= k; lp.atlas = atlas; lp.k = k;
+  return lp;
+}

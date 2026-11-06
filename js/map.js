@@ -3,6 +3,7 @@ import { gibsTime, decodeIR } from './satellite.js';
 import { BLACK_MARBLE_TILES } from './lightpol.js';
 import { tomtomKey } from './routing.js';
 import { cachedJSON } from './util.js';
+import { ATLAS_TILES } from './atlas.js';
 
 const L = window.L;
 const GIBS = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
@@ -23,7 +24,7 @@ const IRLayer = L.TileLayer.extend({
         for (let i = 0; i < p.length; i += 4) {
           if (p[i + 3] < 10) continue;
           const T = decodeIR(CM, p[i], p[i + 1], p[i + 2]);
-          if (!isFinite(T)) { p[i + 3] = 0; continue; }
+          if (!isFinite(T) || T < -86) { p[i + 3] = 0; continue; }   // off-disk space and the cold limb edge
           const a = Math.max(0, Math.min(1, (2 - T) / 30));
           let r = 235, gg = 240, b = 255;
           if (T < -45) { const k = Math.min(1, (-45 - T) / 30); r = 255; gg = 240 - 180 * k; b = 255 - 220 * k; }       // deep convection: yellow to red
@@ -53,7 +54,8 @@ export class MapView {
     // panes: IR clouds blend with "screen" so warm clear ground (dark) vanishes and cold cloud tops glow
     map.createPane('wx'); map.getPane('wx').style.zIndex = 350; 
     map.createPane('labels'); map.getPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none';
-    this.base = this.bases.dark.addTo(map);
+    this.baseKey = localStorage.getItem('ss_base') || 'imagery';
+    this.base = (this.bases[this.baseKey] || this.bases.imagery).addTo(map);
     const t = gibsTime(Date.now() - 30 * 60e3);
     const ir = (sat) => new IRLayer(`${GIBS}/${sat}_Band13_Clean_Infrared/default/${t}/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png`, { maxNativeZoom: 6, maxZoom: 18, opacity: 0.95, pane: 'wx', attribution: 'NASA GIBS / NOAA GOES / JMA Himawari' });
     const gc = (sat) => L.tileLayer(`${GIBS}/${sat}_GeoColor/default/${t}/GoogleMapsCompatible_Level7/{z}/{y}/{x}.png`, { maxNativeZoom: 7, maxZoom: 18, opacity: 0.85, pane: 'wx' });
@@ -62,6 +64,7 @@ export class MapView {
       geocolor: L.layerGroup([gc('GOES-West_ABI'), gc('GOES-East_ABI')]),
       radar: L.layerGroup(),
       lights: L.tileLayer(BLACK_MARBLE_TILES, { maxNativeZoom: 8, maxZoom: 18, opacity: 0.75, attribution: 'NASA Black Marble (VIIRS)' }),
+      atlas: L.tileLayer(ATLAS_TILES, { minZoom: 2, maxNativeZoom: 8, maxZoom: 19, tileSize: 1024, zoomOffset: -2, opacity: 0.55, attribution: 'Light Pollution Atlas 2025, D. Lorenz (VIIRS)' }),
       cloudfc: L.layerGroup(),
       traffic: L.layerGroup(),
     };
@@ -73,7 +76,7 @@ export class MapView {
     if (last) map.setView(last.c, last.z); else map.setView([39.5, -96], 4);
     map.on('moveend', () => { try { localStorage.setItem('ss_view', JSON.stringify({ c: map.getCenter(), z: map.getZoom() })); } catch { } });
   }
-  setBase(k) { this.map.removeLayer(this.base); this.base = this.bases[k].addTo(this.map); if (this.base.bringToBack) this.base.bringToBack(); }
+  setBase(k) { this.map.removeLayer(this.base); this.base = this.bases[k].addTo(this.map); if (this.base.bringToBack) this.base.bringToBack(); this.baseKey = k; try { localStorage.setItem('ss_base', k); } catch { } }
   async toggle(k, on) {
     const m = this.map, layer = this.ov[k];
     if (!on) { m.removeLayer(layer); return ''; }

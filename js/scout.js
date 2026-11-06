@@ -4,6 +4,8 @@ import { destination, clamp, mean, haversine } from './util.js';
 import { gridForecast, airQualityGrid, val, fogRisk } from './weather.js';
 import { quickLP, QUICK, NAT_SKY, lum2mag, bortle } from './lightpol.js';
 import { driveTable, congestion, roadWeatherFactor, roadHazards, route } from './routing.js';
+import { atlasMany, ratioToSqm } from './atlas.js';
+import { terrainHorizons, localObstructions, horizonScore, horizonWorst } from './horizon.js';
 
 const SCOUT_VARS = ['temperature_2m', 'dew_point_2m', 'relative_humidity_2m', 'cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'visibility',
   'precipitation', 'snowfall', 'snow_depth', 'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'wind_speed_250hPa'];
@@ -20,7 +22,7 @@ export function candidateGrid(home, radiusKm, n = 9) {
 // night: from astro.nightInfo; regional: loadRegionalLights result
 export async function scout(home, opts, progress = () => { }) {
   const { radiusKm = 150, night, regional, departLocal, weights = {} } = opts;
-  const W = { clear: 0.40, dark: 0.25, transp: 0.08, fog: 0.08, seeing: 0.04, roads: 0.07, drive: 0.08, ...weights };
+  const W = { clear: 0.36, dark: 0.22, horizon: 0.10, transp: 0.07, fog: 0.07, seeing: 0.04, roads: 0.06, drive: 0.08, ...weights };
   const n = radiusKm > 220 ? 8 : radiusKm > 120 ? 7 : 5;
   const pts = candidateGrid(home, radiusKm, n);
   progress(`Fetching forecasts for ${pts.length} sites from 3 models…`);
@@ -69,42 +71,62 @@ export async function scout(home, opts, progress = () => { }) {
     const wind = val(S, 'wind_speed_10m', tMid) ?? 0;
     const score0 = W.clear * clearScore * (1 - 0.25 * clamp(sp / hours.length / 40, 0, 1)) + W.dark * dark + W.transp * transp + W.fog * (1 - fog) + W.seeing * seeing + W.roads * clamp(2 - roadK, 0, 1);
     return {
-      p, elev: S.elevation, clear: clearScore, spread: sp / hours.length, fog, transp, aod, rh, seeing, jet, sqm, bortle: bortle(sqm), horGlow, lpAz: lp && lp.az,
+      p, elev: S.elevation, darkS: dark, clear: clearScore, spread: sp / hours.length, fog, transp, aod, rh, seeing, jet, sqm, bortle: bortle(sqm), horGlow, lpAz: lp && lp.az,
       snowDepth, snowfall, roadK, hazards, T, wind, perHour, score0, dist: haversine(home[0], home[1], p[0], p[1]) / 1000,
     };
   }).filter(Boolean);
-  // Drive times for the best half
-  res.sort((a, b) => b.score0 - a.score0);
-  const top = res.slice(0, Math.min(60, res.length));
-  progress('Getting driving times…');
-  const dt = await driveTable(home, top.map(r => r.p));
+  // Drive times for every site; OSRM also snaps each site onto the nearest drivable road,
+  // so no destination ends up in a lake or a field with no access.
+  progress('Getting driving times and snapping sites to roads…');
+  const dt = await driveTable(home, res.map(r => r.p));
   const cong = congestion(departLocal || new Date());
   const maxH = opts.maxDriveH || radiusKm / 70;
-  top.forEach((r, i) => {
-    const d = dt[i];
-    r.drive = d ? d.dur : null; r.roadDist = d ? d.dist : null;
-    // Estimated traffic: congestion applies to the urban share of the trip (bright start area).
-    const urbanShare = clamp(Math.log10(1 + (regional ? quickLP(regional, home[0], home[1]).zen * QUICK.zen / NAT_SKY : 1)) / 1.5, 0, 0.8);
-    r.driveTraffic = r.drive != null ? r.drive * (1 + (cong - 1) * urbanShare * Math.min(1, 25000 / Math.max(5000, r.roadDist || 1))) * r.roadK : null;
-    const hrs = r.driveTraffic != null ? r.driveTraffic / 3600 : r.dist / 60;
-    r.reachable = r.drive != null && hrs <= maxH * 1.15;
-    r.driveScore = clamp(1 - hrs / (maxH * 1.3), 0, 1);
-    r.score = Math.round(100 * (r.score0 + W.drive * r.driveScore) * (r.reachable ? 1 : 0.6));
+  const urbanHome = clamp(Math.log10(1 + (regional ? quickLP(regional, home[0], home[1]).zen * QUICK.zen / NAT_SKY : 1)) / 1.5, 0, 0.8);
+  let all = res.map((r, i) => {
+    const d = dt[i]; if (!d || !d.snap || d.snapDist > 2500) return null;   // water, or nowhere near a road
+    r.p = d.snap; r.snapDist = d.snapDist;
+    r.dist = haversine(home[0], home[1], r.p[0], r.p[1]) / 1000;
+    r.drive = d.dur; r.roadDist = d.dist;
+    r.driveTraffic = r.drive * (1 + (cong - 1) * urbanHome * Math.min(1, 25000 / Math.max(5000, r.roadDist || 1))) * r.roadK;
+    return r;
+  }).filter(Boolean);
+  // Darkness at the snapped spot from the light pollution atlas (VIIRS); horizon glow from the regional model.
+  progress('Reading the light pollution atlas…');
+  const at = await atlasMany(all.map(r => r.p)).catch(() => []);
+  all.forEach((r, i) => {
+    const snowK = 1 + 1.5 * clamp(r.snowDepth / 0.05, 0, 1);
+    if (at[i]) { r.sqm = ratioToSqm(at[i].ratio * snowK); r.atlas = true; }
+    else if (regional) r.sqm = lum2mag(NAT_SKY + quickLP(regional, r.p[0], r.p[1]).zen * QUICK.zen * snowK);
+    r.bortle = bortle(r.sqm);
+    r.darkS = clamp((r.sqm - 18.0) / 3.9, 0, 1) * 0.75 + clamp(1 - Math.log10(1 + r.horGlow) / 2, 0, 1) * 0.25;
   });
-  top.sort((a, b) => b.score - a.score);
+  const scoreOf = r => {
+    const hrs = r.driveTraffic / 3600;
+    r.reachable = hrs <= maxH * 1.15; r.driveScore = clamp(1 - hrs / (maxH * 1.3), 0, 1);
+    const hz = r.horizon ?? 0.6;
+    r.score = Math.round(100 * (W.clear * r.clear * (1 - 0.25 * clamp(r.spread / 40, 0, 1)) + W.dark * r.darkS + W.horizon * hz + W.transp * r.transp + W.fog * (1 - r.fog) + W.seeing * r.seeing + W.roads * clamp(2 - r.roadK, 0, 1) + W.drive * r.driveScore) * (r.reachable ? 1 : 0.6));
+  };
+  all.forEach(scoreOf);
+  // Horizon check for the strongest candidates overall and for each single trait.
+  progress('Checking the horizon at the best sites (terrain, forests, buildings)…');
+  const pick = new Set();
+  const byK = (k, n, asc) => [...all].filter(r => r.reachable).sort((a, b) => asc ? a[k] - b[k] : b[k] - a[k]).slice(0, n).forEach(r => pick.add(r));
+  byK('score', 24); byK('darkS', 10); byK('clear', 10); byK('transp', 4); byK('driveTraffic', 4, true);
+  const chk = [...pick];
+  const [tz, lo] = await Promise.all([terrainHorizons(home, radiusKm, chk.map(r => r.p)), localObstructions(chk.map(r => r.p))]);
+  chk.forEach((r, i) => { r.horizon = horizonScore(tz[i], lo[i]); r.horizonWorst = horizonWorst(tz[i], lo[i]); r.hzTerrain = tz[i]; r.hzLocal = lo[i]; scoreOf(r); });
+  all.sort((a, b) => b.score - a.score);
   // Refine the leaders with full routes: congestion where the route crosses bright (urban) areas.
   progress('Checking routes for traffic…');
   const urban = urbanLookup(regional);
-  for (const r of top.slice(0, 6)) {
+  for (const r of all.slice(0, 6)) {
     try {
       const rt = await route(home, r.p, departLocal || new Date(), urban, () => r.roadK);
-      r.route = rt; r.driveTraffic = rt.dur; r.drive = rt.free;
-      const hrs = rt.dur / 3600; r.reachable = hrs <= maxH * 1.15; r.driveScore = clamp(1 - hrs / (maxH * 1.3), 0, 1);
-      r.score = Math.round(100 * (r.score0 + W.drive * r.driveScore) * (r.reachable ? 1 : 0.6));
+      r.route = rt; r.driveTraffic = rt.dur; r.drive = rt.free; scoreOf(r);
     } catch { }
   }
-  top.sort((a, b) => b.score - a.score);
-  return { sites: top, hours, moonW, others: res.slice(top.length) };
+  all.sort((a, b) => b.score - a.score);
+  return { sites: all, hours, moonW, others: [] };
 }
 
 // 0..1 urban-ness from night-light radiance, on a 0.05 degree lookup grid.

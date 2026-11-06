@@ -13,6 +13,7 @@ import { groundFluxGrid, NAT_SKY, lum2mag } from '../lightpol.js';
 import { clamp, smooth, lerp, DEG, curveDrop } from '../util.js';
 import { congestion } from '../routing.js';
 
+const SAFE = 'vec3 safeC(vec3 c){ return vec3(c.r >= 0.0 ? min(c.r, 3.0e4) : 0.0, c.g >= 0.0 ? min(c.g, 3.0e4) : 0.0, c.b >= 0.0 ? min(c.b, 3.0e4) : 0.0); }';
 const FSQ = new THREE.BufferGeometry(); FSQ.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
 function fsPass(frag, uniforms, opts = {}) {
   const m = new THREE.ShaderMaterial({ uniforms, depthTest: !!opts.depth, depthWrite: !!opts.depth, depthFunc: THREE.AlwaysDepth,
@@ -53,16 +54,24 @@ export class Immersive {
     this.clouds = makeCloudPass(U, assets.noise);
     U.uSteps.value = this.q.steps;
     this.mkTargets();
-    this.composite = fsPass(`in vec2 vUv; uniform sampler2D tScene, tCloud, tDepth; void main(){ vec4 c = texture(tCloud, vUv); vec3 s = texture(tScene, vUv).rgb; gl_FragColor = vec4(s*c.a + c.rgb, 1.0); gl_FragDepth = texture(tDepth, vUv).r; }`,
-      { tScene: { value: null }, tCloud: { value: null }, tDepth: { value: null } }, { depth: true });
+    this.composite = fsPass(`in vec2 vUv; uniform sampler2D tScene, tCloud, tDepth; uniform vec2 uCloudPx; ${SAFE}
+      vec4 cl(vec2 uv){ vec4 c = texture(tCloud, uv); return (c.a >= 0.0 && c.a <= 1.0) ? vec4(safeC(c.rgb), c.a) : vec4(0.0, 0.0, 0.0, 1.0); }
+      void main(){
+        // soften the upsampled low-res cloud buffer with a small tent filter
+        vec4 c = cl(vUv)*0.4 + (cl(vUv + vec2(uCloudPx.x, 0.0)) + cl(vUv - vec2(uCloudPx.x, 0.0)) + cl(vUv + vec2(0.0, uCloudPx.y)) + cl(vUv - vec2(0.0, uCloudPx.y)))*0.15;
+        vec3 s = safeC(texture(tScene, vUv).rgb);
+        gl_FragColor = vec4(safeC(s*c.a + c.rgb), 1.0); gl_FragDepth = texture(tDepth, vUv).r; }`,
+      { tScene: { value: null }, tCloud: { value: null }, tDepth: { value: null }, uCloudPx: { value: new THREE.Vector2() } }, { depth: true });
     // temporal accumulation of the jittered cloud march while the view is still
-    this.accum = fsPass(`in vec2 vUv; uniform sampler2D tNew, tOld; uniform float k; void main(){ gl_FragColor = mix(texture(tOld, vUv), texture(tNew, vUv), k); }`, { tNew: { value: null }, tOld: { value: null }, k: { value: 1 } });
-    this.bright = fsPass(`in vec2 vUv; uniform sampler2D t; void main(){ vec3 c = texture(t, vUv).rgb; vec3 b = max(c - 1.5, 0.0); gl_FragColor = vec4(b/(1.0 + dot(b, vec3(0.3))*0.02), 1.0); }`, { t: { value: null } });
+    this.accum = fsPass(`in vec2 vUv; uniform sampler2D tNew, tOld; uniform float k; ${SAFE}
+      vec4 ok(vec4 c){ return (c.a >= 0.0 && c.a <= 1.0) ? vec4(safeC(c.rgb), c.a) : vec4(0.0, 0.0, 0.0, 1.0); }
+      void main(){ gl_FragColor = mix(ok(texture(tOld, vUv)), ok(texture(tNew, vUv)), k); }`, { tNew: { value: null }, tOld: { value: null }, k: { value: 1 } });
+    this.bright = fsPass(`in vec2 vUv; uniform sampler2D t; ${SAFE} void main(){ vec3 c = safeC(texture(t, vUv).rgb); vec3 b = max(c - 1.5, 0.0); gl_FragColor = vec4(b/(1.0 + dot(b, vec3(0.3))*0.02), 1.0); }`, { t: { value: null } });
     this.blur = fsPass(`in vec2 vUv; uniform sampler2D t; uniform vec2 d; void main(){ vec3 s = texture(t, vUv).rgb*0.227; for (int i = 1; i < 5; i++){ float w = float[5](0.227,0.194,0.121,0.054,0.016)[i]; s += (texture(t, vUv + d*float(i)).rgb + texture(t, vUv - d*float(i)).rgb)*w; } gl_FragColor = vec4(s, 1.0); }`, { t: { value: null }, d: { value: new THREE.Vector2() } });
-    this.final = fsPass(`in vec2 vUv; uniform sampler2D t, tB1, tB2; uniform float uScot, uDither;
+    this.final = fsPass(`in vec2 vUv; uniform sampler2D t, tB1, tB2; uniform float uScot, uDither; ${SAFE}
       vec3 tm(vec3 x){ return x*(1.0 + x/9.0)/(1.0 + x); }
       void main(){
-        vec3 c = texture(t, vUv).rgb + texture(tB1, vUv).rgb*0.06 + texture(tB2, vUv).rgb*0.05;
+        vec3 c = safeC(texture(t, vUv).rgb) + safeC(texture(tB1, vUv).rgb)*0.06 + safeC(texture(tB2, vUv).rgb)*0.05;
         float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
         c = mix(c, vec3(L)*vec3(0.78, 0.92, 1.18), uScot);      // Purkinje shift / rod vision
         c = tm(max(c, 0.0));
@@ -151,10 +160,7 @@ export class Immersive {
     this.main.add(s.group);
     this.structures = s;
     // don't start inside a house or a tree: find the nearest open spot
-    const bad = (x, z) => (s.treePts || []).some(t => Math.abs(t.x - x) < 5 && Math.abs(t.z - z) < 5) || (s.buildingPolys || []).some(p => p.length > 2 && Math.abs(p[0][0] - x) < 60 && Math.abs(p[0][1] - z) < 60 && inPoly(x, z, p));
-    if (bad(this.walk.x, this.walk.z)) {
-      outer: for (let r = 6; r < 150; r += 6) for (let a = 0; a < 360; a += 20) { const x = this.walk.x + r * Math.cos(a * DEG), z = this.walk.z + r * Math.sin(a * DEG); if (!bad(x, z)) { this.walk.set(x, 0, z); break outer; } }
-    }
+    this.escape();
     // replace far-light points with a version that skips the structures zone
     if (this.cityLights) { this.cityLights.removeFromParent(); }
     this.cityLights = distantLights(this.U, ctx.lights, ctx.local, (x, z) => this.ground.heightAt(x, z), opts.detail * 2.4, this.mobile);
@@ -406,10 +412,16 @@ export class Immersive {
     if (this.keys.size) {
       const sp = (this.keys.has('shift') ? 25 : 5) * dt, a = this.yaw * DEG;
       const f = new THREE.Vector3(Math.sin(a), 0, -Math.cos(a)), r = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
-      if (this.keys.has('w')) this.walk.addScaledVector(f, sp); if (this.keys.has('s')) this.walk.addScaledVector(f, -sp);
-      if (this.keys.has('d')) this.walk.addScaledVector(r, sp); if (this.keys.has('a')) this.walk.addScaledVector(r, -sp);
+      let mx = 0, mz = 0;
+      if (this.keys.has('w')) { mx += f.x * sp; mz += f.z * sp; } if (this.keys.has('s')) { mx -= f.x * sp; mz -= f.z * sp; }
+      if (this.keys.has('d')) { mx += r.x * sp; mz += r.z * sp; } if (this.keys.has('a')) { mx -= r.x * sp; mz -= r.z * sp; }
+      if (mx || mz) this.move(mx, mz);
       if (this.keys.has('arrowleft')) this.yaw = (this.yaw - 60 * dt + 360) % 360; if (this.keys.has('arrowright')) this.yaw = (this.yaw + 60 * dt) % 360;
       if (this.keys.has('arrowup')) this.pitch = Math.min(89, this.pitch + 40 * dt); if (this.keys.has('arrowdown')) this.pitch = Math.max(-89, this.pitch - 40 * dt);
+    }
+    if (this.joy && (this.joy.f || this.joy.r)) {
+      const a = this.yaw * DEG, sp = (this.joy.run ? 18 : 4.5) * dt;
+      this.move((Math.sin(a) * this.joy.f + Math.cos(a) * this.joy.r) * sp, (-Math.cos(a) * this.joy.f + Math.sin(a) * this.joy.r) * sp);
     }
     if (this.ground && this.ground.heightAt) { const gy = this.ground.heightAt(this.walk.x, this.walk.z); cam.position.set(this.walk.x, gy + this.eye, this.walk.z); }
     cam.fov = this.fov; cam.aspect = this.el.clientWidth / Math.max(1, this.el.clientHeight); cam.updateProjectionMatrix();
@@ -449,13 +461,18 @@ export class Immersive {
     r.setRenderTarget(this.rtMain); r.clear(); r.render(this.main, cam);
     U.uDepth.value = this.rtMain.depthTexture;
     r.setRenderTarget(this.rtCloud); r.clear(); r.render(this.clouds.scene, CAM);
-    const key = [cam.position.x, cam.position.y, cam.position.z, this.yaw, this.pitch, this.fov, this.unix].map(v => v.toFixed(3)).join();
-    if (key !== this.accKey) { this.accKey = key; this.accN = 0; }
-    this.accN = Math.min(this.accN + 1, 12);
+    // Accumulate jittered cloud frames. Small view changes (hand shake, phone sensors) keep part of the history;
+    // big turns, moves or a new time start over.
+    const A = this.accLast || {}, dAng = Math.abs(((this.yaw - (A.yaw ?? 1e9)) + 540) % 360 - 180) + Math.abs(this.pitch - (A.pitch ?? 0)) + Math.abs(this.fov - (A.fov ?? 0)) * 0.5;
+    const dPos = A.pos ? cam.position.distanceTo(A.pos) : 1e9;
+    if (dAng > 4 || dPos > 3 || this.unix !== A.unix) this.accN = 0;
+    else if (dAng > 0.02 || dPos > 0.05) this.accN = Math.min(this.accN, 3);
+    this.accLast = { yaw: this.yaw, pitch: this.pitch, fov: this.fov, pos: cam.position.clone(), unix: this.unix };
+    this.accN = Math.min(this.accN + 1, 16);
     const au = this.accum.mat.uniforms, src = this.rtAcc[this.accI = 1 - (this.accI || 0)], dst = this.rtAcc[1 - this.accI];
     au.tNew.value = this.rtCloud.texture; au.tOld.value = src.texture; au.k.value = 1 / this.accN;
     r.setRenderTarget(dst); r.render(this.accum.scene, CAM);
-    const cu = this.composite.mat.uniforms; cu.tScene.value = this.rtMain.texture; cu.tCloud.value = dst.texture; cu.tDepth.value = this.rtMain.depthTexture;
+    const cu = this.composite.mat.uniforms; cu.tScene.value = this.rtMain.texture; cu.tCloud.value = dst.texture; cu.tDepth.value = this.rtMain.depthTexture; cu.uCloudPx.value.set(0.7 / dst.width, 0.7 / dst.height);
     r.setRenderTarget(this.rtComp); r.clear(); r.render(this.composite.scene, CAM);
     r.render(this.fg, cam);
     // bloom
@@ -468,6 +485,24 @@ export class Immersive {
     // frame time tracking for adaptive quality
     this.ft = lerp(this.ft || dt, dt, 0.05);
     if (this.onFrame) this.onFrame();
+  }
+  // move the viewer out of anything solid (buildings, trees, poles), nearest free spot first
+  escape() {
+    const s = this.structures; if (!s || !s.blocked) return;
+    const gy = this.ground.heightAt(this.walk.x, this.walk.z), y = gy + this.eye;
+    if (!s.blocked(this.walk.x, this.walk.z, y, 0.6)) return;
+    for (let r = 2; r < 200; r += 2) for (let a = 0; a < 360; a += 15) {
+      const x = this.walk.x + r * Math.cos(a * DEG), z = this.walk.z + r * Math.sin(a * DEG);
+      if (!s.blocked(x, z, this.ground.heightAt(x, z) + this.eye, 0.8)) { this.walk.set(x, 0, z); return; }
+    }
+  }
+  // walk with simple collision: slide along walls instead of passing through
+  move(dx, dz) {
+    const s = this.structures, w = this.walk;
+    const ok = (x, z) => !s || !s.blocked || !s.blocked(x, z, this.ground.heightAt(x, z) + this.eye);
+    if (ok(w.x + dx, w.z + dz)) { w.x += dx; w.z += dz; }
+    else if (ok(w.x + dx, w.z)) w.x += dx;
+    else if (ok(w.x, w.z + dz)) w.z += dz;
   }
   measureSky() {
     const rt = this.lut.rt, W = rt.width, H = rt.height;
@@ -492,7 +527,7 @@ export class Immersive {
     // Milky Way core
     const m = this.U.uEqToWorld.value.elements, ra = 266.4 * DEG, de = -28.9 * DEG, e = [Math.cos(de) * Math.cos(ra), Math.cos(de) * Math.sin(ra), Math.sin(de)];
     const x = m[0] * e[0] + m[3] * e[1] + m[6] * e[2], y = m[1] * e[0] + m[4] * e[1] + m[7] * e[2], z = m[2] * e[0] + m[5] * e[1] + m[8] * e[2];
-    if (y > 0) d.push({ t: 'Galactic core', vec: [x, y, z], cls: 'mw' });
+    if (y > 0 && this.sm.sun.alt < -10) d.push({ t: 'Galactic core', vec: [x, y, z], cls: 'mw' });
     this.overlays.setDynamic(d);
   }
 }

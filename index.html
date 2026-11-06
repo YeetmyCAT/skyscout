@@ -29,14 +29,15 @@
   <div id="map"></div>
   <div id="layersCard" class="card floating">
     <div class="cardhead">Map layers</div>
-    <label><input type="radio" name="base" value="dark" checked> Dark map</label>
+    <label><input type="radio" name="base" value="dark"> Dark map</label>
     <label><input type="radio" name="base" value="streets"> Streets</label>
-    <label><input type="radio" name="base" value="imagery"> Satellite photo</label>
+    <label><input type="radio" name="base" value="imagery" checked> Satellite photo</label>
     <hr>
     <label><input type="checkbox" data-ov="ir" checked> Live satellite clouds (IR)</label>
     <label><input type="checkbox" data-ov="geocolor"> Live satellite colour</label>
     <label><input type="checkbox" data-ov="radar"> Live radar</label>
     <label><input type="checkbox" data-ov="cloudfc"> Cloud forecast at slider time</label>
+    <label><input type="checkbox" data-ov="atlas"> Light pollution atlas 2025</label>
     <label><input type="checkbox" data-ov="lights"> Night lights (VIIRS)</label>
     <label><input type="checkbox" data-ov="traffic"> Live traffic (TomTom key)</label>
     <div class="small muted" id="layerNote"></div>

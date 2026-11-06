@@ -17,7 +17,8 @@ export async function loadStructures(lat, lon, detail = 1500) {
  relation["natural"="wood"](${mid}); relation["landuse"="forest"](${mid});
  way["landuse"~"^(farmland|orchard|vineyard|meadow|allotments|plant_nursery)$"](${mid});
  relation["landuse"~"^(farmland|meadow)$"](${mid});
- way["natural"="water"](${mid}); way["waterway"="riverbank"](${mid});
+ way["natural"="water"](${mid}); way["waterway"="riverbank"](${mid}); relation["natural"="water"](${mid});
+ way["waterway"~"^(river|canal|stream)$"](${mid});
  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|motorway_link|trunk_link|primary_link|living_street)$"](${mid});
  node["highway"="street_lamp"](${mid});
  node["man_made"="street_lamp"](${mid});
@@ -46,7 +47,7 @@ out geom qt;`;
 const num = v => { if (v == null) return null; const m = String(v).match(/[\d.]+/); return m ? parseFloat(m[0]) : null; };
 
 function classify(data, meta) {
-  const out = { buildings: [], farms: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
+  const out = { buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
   for (const e of data.elements || []) {
     const t = e.tags || {};
     const geom = e.geometry ? e.geometry.map(p => [p.lat, p.lon]) : null;
@@ -61,6 +62,7 @@ function classify(data, meta) {
     }
     if (e.type === 'relation') {
       const rings = (e.members || []).filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(p => [p.lat, p.lon]));
+      if (t.natural === 'water') { for (const r of rings) out.water.push({ ring: r }); continue; }
       if (/farmland|meadow/.test(t.landuse || '')) { for (const r of rings) out.farms.push({ ring: r, kind: t.landuse, crop: t.crop, id: e.id }); continue; }
       for (const r of rings) out.forests.push({ ring: r, leaf: t.leaf_type });
       continue;
@@ -72,6 +74,7 @@ function classify(data, meta) {
     } else if (t.natural === 'tree_row') out.trees.push(...geom.map(p => ({ p, row: true, leaf: t.leaf_type })));
     else if (/^(farmland|orchard|vineyard|meadow|allotments|plant_nursery)$/.test(t.landuse || '')) out.farms.push({ ring: geom, kind: t.landuse, crop: t.crop, id: e.id });
     else if (t.natural === 'wood' || t.landuse === 'forest') out.forests.push({ ring: geom, leaf: t.leaf_type });
+    else if (/^(river|canal|stream)$/.test(t.waterway || '')) out.rivers.push({ line: geom, w: t.waterway === 'stream' ? 3 : num(t.width) || (t.waterway === 'canal' ? 15 : 25) });
     else if (t.natural === 'water' || t.waterway) out.water.push({ ring: geom });
     else if (t.highway) out.roads.push({ line: geom, kind: t.highway, lanes: num(t.lanes), lit: t.lit === 'yes', name: t.name || t.ref || '' });
     else if (t.power === 'line' || t.power === 'minor_line') out.powerLines.push({ line: geom, minor: t.power === 'minor_line', voltage: num(t.voltage), cables: num(t.cables) });
@@ -84,4 +87,16 @@ function classify(data, meta) {
     else if (t.aeroway) out.runways.push({ line: geom, kind: t.aeroway });
   }
   return out;
+}
+
+// Raw Overpass query with mirror fallback and caching.
+export async function overpassQuery(q, key, ttl = 30 * 864e5, timeout = 90000) {
+  let lastErr;
+  for (const m of MIRRORS) {
+    try {
+      const r = await cachedJSON(key, m, ttl, { fetch: { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, timeout });
+      return r.data;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('Overpass unavailable');
 }

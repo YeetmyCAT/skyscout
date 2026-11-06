@@ -156,7 +156,7 @@ export function makeSkyBackground(U, mwTex) {
           vec3 T = directT(max(sh, 0.0));
           col += mwc * m * 1.3e-3 * uMWScale * uExposure * T * smoothstep(-0.05, 0.03, sh);
         }
-        gl_FragColor = vec4(col, 1.0);
+        gl_FragColor = vec4(min(col, vec3(3.0e4)), 1.0);
       }`,
   });
   const mesh = new THREE.Mesh(FSQ, mat); mesh.frustumCulled = false; mesh.renderOrder = -100;
@@ -224,7 +224,7 @@ function starMaterial(U, eq) {
         vec3 d = ${eq ? 'uEqToWorld * position' : 'position'};
         // refraction lift near the horizon
         float h = asin(clamp(d.y,-1.0,1.0))*57.2958;
-        float rf = 1.02/tan(radians(h + 10.3/(h + 5.11)))/60.0; h += max(rf, 0.0);
+        float hh = max(h, -1.0); float rf = 1.02/tan(radians(hh + 10.3/(hh + 5.11)))/60.0; h += clamp(rf, 0.0, 0.6);
         float hr = radians(h); vec2 hz = normalize(d.xz); d = vec3(hz.x*cos(hr), sin(hr), hz.y*cos(hr));
         float m = mag;
         vec3 T = directT(d.y);
@@ -253,7 +253,7 @@ function starMaterial(U, eq) {
       void main(){
         #include <logdepthbuf_fragment>
         vec2 p = gl_PointCoord*2.0-1.0; float r2 = dot(p,p); if (r2 > 1.0) discard;
-        float g = exp(-r2*4.0); gl_FragColor = vec4(vCol * g * 1.6, 1.0);
+        float g = exp(-r2*4.0); gl_FragColor = vec4(min(vCol * g * 1.6, vec3(3.0e4)), 1.0);
       }`,
   });
 }
@@ -319,7 +319,7 @@ export function makeMoon(U) {
         vec3 T = directT(uMoonDir.y);
         vec3 c = vec3(1.0, 0.95, 0.88) * (L + earthshine) * T * uExposure;
         float edge = smoothstep(1.0, 0.96, r2);
-        gl_FragColor = vec4(c * edge * smoothstep(-0.01, 0.005, uMoonDir.y), 1.0);
+        gl_FragColor = vec4(min(c * edge * smoothstep(-0.01, 0.005, uMoonDir.y), vec3(3.0e4)), 1.0);
       }`,
   });
   const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = -80;

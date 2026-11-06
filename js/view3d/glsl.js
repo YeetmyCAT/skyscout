@@ -32,6 +32,24 @@ vec3 hazeL(vec3 dir){
   vec3 b = 0.5*(skyL(normalize(vec3(-uSunDir.x, 0.05, -uSunDir.z) + 1e-4)) + skyL(normalize(vec3(uSunDir.z, 0.05, -uSunDir.x) + 1e-4)));
   return mix(a, b, uOvercast) * (1.0 - 0.78*uOvercast);
 }
+// Open water: wind ripples, Fresnel reflection of the sky (and skyglow at night), sun/moon glint.
+vec3 waterShade(vec3 W, float rough){
+  vec3 V = normalize(W - cameraPosition);
+  float t = uTime*0.6;
+  vec2 q = W.xz;
+  float h1 = fbm2(q*0.08 + vec2(t*0.11, t*0.07)), h2 = fbm2(q*0.35 - vec2(t*0.2, -t*0.13));
+  vec2 g = vec2(fbm2(q*0.08 + vec2(0.7, 0.0) + vec2(t*0.11, t*0.07)) - h1, fbm2(q*0.08 + vec2(0.0, 0.7) + vec2(t*0.11, t*0.07)) - h1) * 1.4
+         + vec2(fbm2(q*0.35 + vec2(0.4, 0.0) - vec2(t*0.2, -t*0.13)) - h2, fbm2(q*0.35 + vec2(0.0, 0.4) - vec2(t*0.2, -t*0.13)) - h2) * 0.8;
+  vec3 n = normalize(vec3(-g.x*rough, 1.0, -g.y*rough));
+  float c = max(dot(-V, n), 0.0), F = 0.02 + 0.98*pow(1.0 - c, 5.0);
+  vec3 R = reflect(V, n); R.y = abs(R.y);
+  vec3 refl = hazeL(R) * (1.0 - uOvercast*0.2);
+  vec3 deep = vec3(0.012, 0.022, 0.026) * (skyL(vec3(0.0, 1.0, 0.0)) + (uSunE*max(uSunDir.y, 0.0)*directT(uSunDir.y))*uExposure*0.2/PI);
+  vec3 col = mix(deep, refl, F);
+  float gs = pow(max(dot(R, uSunDir), 0.0), 600.0) * 40.0, gm = pow(max(dot(R, uMoonDir), 0.0), 400.0) * 40.0;
+  col += (uSunE*directT(uSunDir.y)*gs*step(0.0, uSunDir.y) + uMoonE*directT(uMoonDir.y)*gm*step(0.0, uMoonDir.y)) * uExposure * 1e-3 * (1.0 - uOvercast);
+  return col;
+}
 // Aerial perspective: blend toward the horizon sky colour with distance (metres).
 vec3 aerial(vec3 col, vec3 dir, float dist){
   float k = 3.912 / max(uVisKm*1000.0, 500.0);

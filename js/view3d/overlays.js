@@ -18,7 +18,7 @@ export class Overlays {
     this.group = new THREE.Group(); this.horGroup = new THREE.Group(); this.eqGroup = new THREE.Group();
     this.group.add(this.horGroup, this.eqGroup);
     this.labels = document.createElement('div'); this.labels.className = 'labels3d'; container.append(this.labels);
-    this.items = []; this.on = { grid: true, cardinals: true, ecliptic: false, equator: false, meridian: true, constellations: false, labels: true, domes: true };
+    this.items = []; this.on = { grid: false, cardinals: true, ecliptic: false, equator: false, meridian: false, constellations: false, labels: false, domes: true };
     // alt/az grid
     const g = [];
     for (let alt = 0; alt < 90; alt += 10) for (let az = 0; az < 360; az += 2) g.push(...v(alt, az), ...v(alt, az + 2));
@@ -62,14 +62,21 @@ export class Overlays {
     }
     if (this.on.ecliptic && this.eqMat) L.push(...[0, 90, 180, 270].map(l => { const e = ecl(l).map(x => x / RAD), m = this.eqMat; return { t: 'ecliptic', vec: [m[0] * e[0] + m[1] * e[1] + m[2] * e[2], m[3] * e[0] + m[4] * e[1] + m[5] * e[2], m[6] * e[0] + m[7] * e[1] + m[8] * e[2]], cls: 'gridlbl ecl' }; }).filter(x => x.vec[1] > 0));
     for (const d of this.dynamic || []) if (this.on.labels || d.always) if (!(d.dome && !this.on.domes)) L.push(d);
-    // project
+    // project, most important first; drop labels that would overlap one already placed
+    const pri = c => /cardi/.test(c) ? 0 : /planet|storm/.test(c) ? 1 : /dome|mw/.test(c) ? 2 : /star/.test(c) ? 4 : 3;
+    L.sort((a, b) => pri(a.cls) - pri(b.cls));
+    const boxes = [];
     const out = [], P = new THREE.Vector3();
     for (const l of L) {
       const vv = l.vec || altAzToVec(l.alt, l.az);
       if (vv[1] < -0.012 && !l.always) continue;
       P.set(vv[0], vv[1], vv[2]).multiplyScalar(1000).add(camera.position).project(camera);
       if (P.z > 1 || Math.abs(P.x) > 1.05 || Math.abs(P.y) > 1.05) continue;
-      out.push(`<div class="${l.cls}" style="transform:translate(${((P.x + 1) / 2 * w).toFixed(1)}px,${((1 - P.y) / 2 * h).toFixed(1)}px)">${l.t}</div>`);
+      const x = (P.x + 1) / 2 * w, y = (1 - P.y) / 2 * h, bw = String(l.t).length * 6.6 + 8, bh = 15;
+      const bx = /cardi/.test(l.cls) ? x - 6 : x + 6, by = y - 7;
+      if (boxes.some(b => bx < b[0] + b[2] && bx + bw > b[0] && by < b[1] + b[3] && by + bh > b[1])) continue;
+      boxes.push([bx, by, bw, bh]);
+      out.push(`<div class="${l.cls}" style="transform:translate(${x.toFixed(1)}px,${y.toFixed(1)}px)">${l.t}</div>`);
     }
     const html = out.join('');
     if (html !== this.lastHtml) { this.labels.innerHTML = html; this.lastHtml = html; }

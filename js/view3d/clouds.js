@@ -75,6 +75,8 @@ export function makeCloudPass(U, noise) {
           if (detail && c > 0.0){
             vec4 dn = texture(uDetail, q/1100.0 + vec3(0.0, uTime*0.002, 0.0));
             float df = dn.r*0.625 + dn.g*0.25 + dn.b*0.125;
+            // a finer octave for crisp cauliflower edges on cumuliform clouds (within ~15 km)
+            if (cu > 0.4 && length(p - uCamPos) < 15000.0) { vec4 d2 = texture(uDetail, q/330.0 + vec3(uTime*0.001, 0.0, 0.0)); df = mix(df, d2.r*0.6 + d2.g*0.4, 0.35); }
             df = mix(df, 1.0 - df, clamp(h*4.0, 0.0, 1.0));
             c = remap(c, df*mix(0.15, 0.35, cu), 1.0, 0.0, 1.0);
           }
@@ -163,7 +165,7 @@ export function makeCloudPass(U, noise) {
         float t0 = 0.0;
         if (t1 <= t0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
         int N = int(uSteps);
-        float jit = ign(gl_FragCoord.xy + float(int(uFrame) % 16)*5.588);
+        float jit = fract(ign(gl_FragCoord.xy) + float(int(uFrame) % 64)*0.61803398875);   // golden-ratio sequence: decorrelated frame to frame
         vec3 col = vec3(0.0); float T = 1.0, dsum = 0.0, wsum = 0.0;
         float cs = dot(rd, uSunDir), cm = dot(rd, uMoonDir);
         float phS = mix(hg(cs, 0.8), hg(cs, -0.25), 0.4), phM = mix(hg(cm, 0.8), hg(cm, -0.25), 0.4);
@@ -215,6 +217,8 @@ export function makeCloudPass(U, noise) {
         if (T < 0.02) T = 0.0;     // opaque: nothing behind (the Sun disc must not leak through)
         vec3 cMean = col/max(1.0 - T, 1e-3);
         col = col*e + (1.0 - T)*mix(skyHz, cMean, 0.6)*(1.0 - e);
+        if (!(T >= 0.0 && T <= 1.0)) T = 1.0;
+        col = vec3(col.r >= 0.0 ? min(col.r, 3.0e4) : 0.0, col.g >= 0.0 ? min(col.g, 3.0e4) : 0.0, col.b >= 0.0 ? min(col.b, 3.0e4) : 0.0);
         gl_FragColor = vec4(col, T);
       }`,
   });

@@ -99,7 +99,7 @@ export class Lightning {
     this.boltMat = new THREE.ShaderMaterial({
       uniforms: { ...U, uI: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: '#include <common>\n#include <logdepthbuf_pars_vertex>\nvoid main(){ gl_Position = projectionMatrix*viewMatrix*modelMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
-      fragmentShader: 'uniform float uI, uExposure;\n#include <logdepthbuf_pars_fragment>\nvoid main(){\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(vec3(0.8,0.85,1.0)*uI, 1.0); }',
+      fragmentShader: 'uniform float uI, uExposure;\n#include <logdepthbuf_pars_fragment>\nvoid main(){\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(vec3(0.8,0.85,1.0)*min(uI, 3.0e4), 1.0); }',
     });
   }
   // cells: [{x, z, top, strength}] in metres; rate: flashes per minute in total

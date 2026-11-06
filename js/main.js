@@ -2,11 +2,12 @@
 import { $, el, clamp, makeLocal, Net, fmtAgo, cachedJSON, haversine, bearing, destination, DEG, idbPrune } from './util.js';
 import { pointForecast, gridForecast, airQuality, val, cloudLayers, cloudTypeNames, fogRisk, precipState, MODEL_NAMES, WMO, profile, GRID_MODELS } from './weather.js';
 import { loadIR, analyseIR, satLayer } from './satellite.js';
-import { loadLights, skyBrightness, domeNames, bortle, BORTLE_TXT, nelm, lum2mag, NAT_SKY, loadRegionalLights, quickLP, QUICK } from './lightpol.js';
+import { atlasRatio, ratioToSqm } from './atlas.js';
+import { calibrateToAtlas, loadLights, skyBrightness, domeNames, bortle, BORTLE_TXT, nelm, lum2mag, NAT_SKY, loadRegionalLights, quickLP, QUICK } from './lightpol.js';
 import { nightInfo, sunMoon, phaseName } from './astro.js';
 import { scout, urbanLookup } from './scout.js';
 import { findSprites } from './sprites.js';
-import { route, roadHazards, congestion, tomtomKey } from './routing.js';
+import { route, roadHazards, congestion, tomtomKey, driveTable } from './routing.js';
 import { loadStructures } from './osm.js';
 import { MapView } from './map.js';
 
@@ -31,6 +32,13 @@ const tz = () => (S.data && S.data.point.tz) || undefined;
 // ---------------- boot ----------------
 const map = new MapView($('#map'), (la, lo) => selectLocation(la, lo));
 S.map = map;
+// iOS home-screen apps report a viewport short by the status bar; size the app from the real screen there.
+function fitApp() {
+  const portrait = matchMedia('(orientation: portrait)').matches;
+  const h = navigator.standalone ? (portrait ? Math.max(screen.height, screen.width) : Math.min(screen.height, screen.width)) : innerHeight;
+  document.documentElement.style.setProperty('--appH', h + 'px');
+}
+fitApp(); addEventListener('resize', fitApp); addEventListener('orientationchange', () => setTimeout(fitApp, 300));
 function boot() {
   setupUI();
   updateOffline();
@@ -74,7 +82,7 @@ function updateOffline() {
 // ---------------- UI wiring ----------------
 function setupUI() {
   $('#layersBtn').onclick = () => $('#layersCard').classList.toggle('show');
-  document.querySelectorAll('input[name=base]').forEach(r => r.onchange = () => map.setBase(r.value));
+  document.querySelectorAll('input[name=base]').forEach(r => { r.checked = r.value === map.baseKey; r.onchange = () => map.setBase(r.value); });
   document.querySelectorAll('[data-ov]').forEach(c => c.onchange = async () => { const k = c.dataset.ov; const note = await map.toggle(k, c.checked); $('#layerNote').textContent = note || ''; if (k === 'cloudfc' && c.checked) updateCloudOverlay(true); });
   document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
@@ -110,7 +118,7 @@ function setupUI() {
   $('#clearCache').onclick = async () => { indexedDB.deleteDatabase('skyscout'); if (window.caches) for (const k of await caches.keys()) await caches.delete(k); alert('Saved data cleared.'); };
   // 3D
   $('#close3d').onclick = close3D;
-  $('#menu3dBtn').onclick = () => $('#menu3d').classList.toggle('hidden');
+  $('#menu3dBtn').onclick = () => { $('#menu3d').classList.toggle('hidden'); document.body.classList.toggle('menu-open', !$('#menu3d').classList.contains('hidden')); };
   $('#loadStruct').onclick = loadStructuresNow;
 }
 async function suggest(force) {
@@ -164,6 +172,8 @@ async function computeLP() {
   const aod = d.aq ? d.aq.aod[Math.max(0, d.aq.t.findIndex(x => x >= t))] ?? 0.12 : 0.12;
   const L = cloudLayers(d.point, t, d.point.elevation);
   d.lp = await skyBrightness(d.lights, { lat: d.lat, lon: d.lon, aod, snow, cloudBaseKm: Math.max(0.3, (L.low.base - d.point.elevation) / 1000), obsZ: d.point.elevation });
+  d.atlas = await atlasRatio(d.lat, d.lon).catch(() => null);
+  calibrateToAtlas(d.lp, d.atlas, snow);
   d.lpSnow = snow;
   const q = quickLP(d.lights, d.lat, d.lon);
   if (q.zen > 0 && d.lp.zenith > 0) d.quickZenRatio = d.lp.zenith / q.zen;
@@ -218,6 +228,7 @@ function renderConditions() {
       <div class="stat"><div class="k">Naked-eye limit (no moon)</div><div class="v">${nelm(sqm).toFixed(1)} <small>mag</small></div></div>
       <div class="stat"><div class="k">Artificial / natural</div><div class="v">${(d.lp.zenith / NAT_SKY * 100).toFixed(0)}% <small>at zenith</small></div></div>
     </div>
+    <div class="small muted">${d.atlas ? `Zenith from the Light Pollution Atlas ${d.atlas.year} (D. Lorenz, VIIRS)${d.lpSnow > 0.05 ? ', brightened for snow cover' : ''}; whole-sky glow from SkyScout's scattering model.` : 'Zenith from the SkyScout scattering model (atlas unavailable here).'}</div>
     <canvas class="polar" id="lpPolar" width="380" height="380"></canvas>
     <div class="small muted" style="text-align:center">Whole-sky light pollution: brightness by direction and height (N up). Domes: ${(d.domes || []).map(x => `${x.name || '?'} ${dirName(x.az)}`).join(' · ') || '—'}</div>`
     : `<div class="small muted">${d.lights === null ? 'Loading night-lights data…' : 'Night-lights data unavailable.'}</div>`;
@@ -346,21 +357,28 @@ window.addEventListener('resize', () => { drawTimeline(); if (S.data && $('#clou
 // Regional cloud-forecast overlay for the map at the slider time
 let cfTimer = null;
 async function updateCloudOverlay(now) {
-  if (!document.querySelector('[data-ov=cloudfc]').checked || !S.sel) return;
+  if (!document.querySelector('[data-ov=cloudfc]').checked) return;
   clearTimeout(cfTimer);
   cfTimer = setTimeout(async () => {
-    const { lat, lon } = S.sel, n = 11, half = 350000, local = makeLocal(lat, lon), pts = [];
-    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) pts.push(local.toLL((i / (n - 1) * 2 - 1) * half, ((n - 1 - j) / (n - 1) * 2 - 1) * half));
+    // Grid over the visible map (padded), evenly spaced in Web-Mercator so the image lines up at any zoom.
+    const b = map.map.getBounds().pad(0.15), n = 13;
+    const S0 = Math.max(-80, b.getSouth()), N0 = Math.min(80, b.getNorth()), W0 = b.getWest(), E0 = b.getEast();
+    const my = la => Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360)), iy = y => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180 / Math.PI;
+    // snap the box so small pans reuse cached forecasts
+    const q = Math.max(0.25, Math.pow(2, Math.round(Math.log2((E0 - W0) / 24))));
+    const w = Math.floor(W0 / q) * q, e = Math.ceil(E0 / q) * q, s0 = Math.floor(S0 / q) * q, n0 = Math.ceil(N0 / q) * q;
+    const y0 = my(s0), y1 = my(n0), pts = [];
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) pts.push([iy(y1 - (y1 - y0) * j / (n - 1)), ((w + (e - w) * i / (n - 1) + 540) % 360) - 180]);
     try {
-      const ser = await gridForecast(pts, `cf${lat.toFixed(1)},${lon.toFixed(1)}`, { vars: ['cloud_cover'] });
+      const ser = await gridForecast(pts, `cf${w},${s0},${e},${n0}`, { vars: ['cloud_cover'] });
       const t = S.time.getTime() / 1000, grid = [];
       for (let j = 0; j < n; j++) { grid.push([]); for (let i = 0; i < n; i++) grid[j].push((val(ser[j * n + i], 'cloud_cover', t) ?? 0) / 100); }
-      const nw = local.toLL(-half, half), se = local.toLL(half, -half);
-      map.setCloudOverlay(grid, [[se[0], nw[1]], [nw[0], se[1]]]);
+      map.setCloudOverlay(grid, [[s0, w], [n0, e]]);
       $('#layerNote').textContent = `Cloud forecast (3-model mean) for ${fmtDT(S.time, tz())}`;
-    } catch (e) { $('#layerNote').textContent = 'Cloud forecast unavailable'; }
-  }, now ? 0 : 400);
+    } catch (e) { $('#layerNote').textContent = 'Cloud forecast unavailable: ' + e.message; }
+  }, now ? 0 : 500);
 }
+map.map.on('moveend', () => updateCloudOverlay());
 
 // ---------------- 3D view ----------------
 async function loadAssets() {
@@ -406,7 +424,9 @@ async function open3D(site) {
     if (lights && !lp) {
       prog('Modelling light pollution across the whole sky…');
       const t = S.time.getTime() / 1000, L = cloudLayers(point, t, point.elevation);
-      lp = await skyBrightness(lights, { lat, lon, aod: 0.12, snow: clamp((val(point, 'snow_depth', t) ?? 0) / 0.06, 0, 1), cloudBaseKm: Math.max(0.3, (L.low.base - point.elevation) / 1000), obsZ: point.elevation });
+      const snow = clamp((val(point, 'snow_depth', t) ?? 0) / 0.06, 0, 1);
+      lp = await skyBrightness(lights, { lat, lon, aod: 0.12, snow, cloudBaseKm: Math.max(0.3, (L.low.base - point.elevation) / 1000), obsZ: point.elevation });
+      calibrateToAtlas(lp, await atlasRatio(lat, lon).catch(() => null), snow);
       domes = await domeNames(lights, lat, lon).catch(() => []);
     }
     const ctx = { lat, lon, name: site ? site.name : S.sel.name, time: S.time, local, groundZ: point.elevation, point, utcOffset: point.utcOffset, aq, lights, lp, domes,
@@ -457,7 +477,18 @@ function setup3DMenu() {
   $('#ev').oninput = e => v.ev = +e.target.value;
   const mode = cam => { v.cameraMode = cam; $('#modeEye').classList.toggle('on', !cam); $('#modeCam').classList.toggle('on', cam); };
   $('#modeEye').onclick = () => mode(false); $('#modeCam').onclick = () => mode(true); mode(false);
-  $('#eyeH').onchange = e => v.eye = +e.target.value;
+  $('#eyeH').onchange = e => { v.eye = +e.target.value; v.escape(); };
+  // on-screen walking stick (phones and tablets); WASD/arrows on a keyboard
+  if (matchMedia('(pointer: coarse)').matches) {
+    const joy = el('div', { class: 'hud joy' }, el('b', {}, 'walk'), el('i')), knob = joy.querySelector('i');
+    $('#view3d').append(joy);
+    let id = null, cx = 0, cy = 0;
+    const set = (x, y) => { const R = 50, dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy), k = d > R ? R / d : 1; knob.style.transform = `translate(${dx * k}px,${dy * k}px)`; v.joy = { f: -dy * k / R, r: dx * k / R, run: d > R * 1.6 }; };
+    joy.addEventListener('pointerdown', e => { e.stopPropagation(); id = e.pointerId; joy.setPointerCapture(id); const r = joy.getBoundingClientRect(); cx = r.left + r.width / 2; cy = r.top + r.height / 2; set(e.clientX, e.clientY); });
+    joy.addEventListener('pointermove', e => { if (e.pointerId === id) set(e.clientX, e.clientY); });
+    const end = e => { if (e.pointerId !== id) return; id = null; knob.style.transform = ''; v.joy = null; };
+    joy.addEventListener('pointerup', end); joy.addEventListener('pointercancel', end);
+  }
   $('#gyroBtn').onclick = async () => { const on = await v.enableGyro(!v.gyro); $('#gyroBtn').classList.toggle('on', on); };
   $('#soundBtn').onclick = () => { if (v.audio.on) v.audio.disable(); else v.audio.enable(); $('#soundBtn').classList.toggle('on', v.audio.on); };
   $('#spriteSim').onclick = () => { const on = v.U.uSpriteMode.value < 0.5; v.U.uSpriteMode.value = on ? 1 : 0; $('#spriteSim').classList.toggle('on', on); };
@@ -491,9 +522,11 @@ function renderScoutTab() {
     <div class="row"><label>Max drive <select id="scDrive"><option value="0.75">45 min</option><option value="1">1 h</option><option value="1.5" selected>1.5 h</option><option value="2">2 h</option><option value="3">3 h</option><option value="4">4 h</option></select></label>
     <label>Night <select id="scNight"><option value="0">Tonight</option><option value="1">Tomorrow</option><option value="2">In 2 nights</option></select></label></div>
     <div class="row"><label>Goal <select id="scGoal"><option value="mw">Milky Way / wide-field</option><option value="deep">Deep-sky imaging</option><option value="land">Nightscape (moon OK)</option><option value="planet">Planets / Moon (seeing)</option></select></label></div>
+    <div class="row"><label>Rank by <select id="scRank"><option value="score">Everything (overall score)</option><option value="clear">Clear sky only</option><option value="dark">Darkness / light pollution only</option><option value="horizon">Open horizon only</option><option value="weather">Weather only (clouds, fog, haze)</option><option value="drive">Shortest drive</option><option value="seeing">Seeing only</option></select></label></div>
     <button class="btn primary big" id="scGo">Find the best spots</button>
     <div id="scProg" class="small muted"></div><div id="scList"></div>`;
   $('#scGo').onclick = runScout;
+  $('#scRank').onchange = () => listScout();
   if (S.scoutRes) listScout();
 }
 async function runScout() {
@@ -511,24 +544,31 @@ async function runScout() {
     const depart = new Date(Math.max(Date.now(), (night.sunset || d0).getTime() - maxH * 3600e3));
     const res = await scout(home, { radiusKm, night, regional, departLocal: depart, weights: W, maxDriveH: maxH }, prog);
     res.night = night; res.home = home; res.regional = regional; res.depart = depart;
-    S.scoutRes = res; prog(`Checked ${res.sites.length + res.others.length} sites with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
+    S.scoutRes = res; prog(`Checked ${res.sites.length} reachable sites (snapped to roads) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
     listScout();
   } catch (e) { console.error(e); prog('Scouting failed: ' + e.message); }
 }
 function listScout() {
   const r = S.scoutRes, box = $('#scList'); if (!r || !box) return;
   map.results.clearLayers(); map.routes.clearLayers();
-  const top = r.sites.slice(0, 12);
-  box.innerHTML = '';
+  // Rank by one trait if asked; reachable sites (within the drive limit) only.
+  const rank = ($('#scRank') || {}).value || 'score';
+  const metric = {
+    score: s => s.score, clear: s => s.clear - s.spread / 400, dark: s => s.sqm, horizon: s => s.horizon ?? -1,
+    weather: s => s.clear * 0.7 + (1 - s.fog) * 0.15 + s.transp * 0.15 - s.spread / 400, drive: s => -s.driveTraffic, seeing: s => s.seeing,
+  }[rank];
+  const pool = rank === 'score' ? r.sites : r.sites.filter(s => s.reachable);
+  const top = [...pool].sort((a, b) => metric(b) - metric(a)).slice(0, 12);
+  box.innerHTML = rank === 'horizon' ? '<div class="small muted">Horizon is checked for the strongest ~40 sites (terrain plus mapped forests and buildings).</div>' : '';
   top.forEach((s, i) => {
     const c = s.score > 70 ? '#5ad19a' : s.score > 50 ? '#e8c35a' : '#ff7b6b';
     const m = L.marker(s.p, { icon: L.divIcon({ className: '', html: `<div class="mk" style="background:${c}">${s.score}</div>`, iconSize: [26, 26], iconAnchor: [13, 13] }) }).addTo(map.results);
-    const bars = [['Clear', s.clear], ['Dark', clamp((s.sqm - 18) / 3.9, 0, 1)], ['No fog', 1 - s.fog], ['Transp.', s.transp], ['Seeing', s.seeing], ['Roads', clamp(2 - s.roadK, 0, 1)]];
+    const bars = [['Clear', s.clear], ['Dark', clamp((s.sqm - 18) / 3.9, 0, 1)], ['Horizon', s.horizon ?? 0], ['No fog', 1 - s.fog], ['Transp.', s.transp], ['Seeing', s.seeing]];
     const card = el('div', { class: 'site' });
     card.innerHTML = `<div class="top"><div><b>#${i + 1}</b> · ${U.km(s.dist)} ${dirName(bearing(r.home[0], r.home[1], s.p[0], s.p[1]))} · ${U.m(s.elev || 0)}</div><div style="color:${c};font-weight:800;font-size:18px">${s.score}</div></div>
       <div class="small">${s.driveTraffic != null ? `🚗 ${fmtDur(s.driveTraffic)}${s.drive && s.driveTraffic > s.drive * 1.05 ? ` <span class="muted">(${fmtDur(s.drive)} without traffic)</span>` : ''}` : 'No road route found'} · SQM ${s.sqm.toFixed(2)} (Bortle ${s.bortle}) · clouds ${(100 - s.clear * 100).toFixed(0)}% ±${s.spread.toFixed(0)}</div>
       <div class="grid2" style="grid-template-columns:repeat(3,1fr);gap:4px 10px;margin:6px 0 2px">${bars.map(([k, v]) => `<div class="small">${k}<div class="bar"><i style="width:${(v * 100).toFixed(0)}%;background:${colorFor(v)}"></i></div></div>`).join('')}</div>
-      ${s.hazards.length ? s.hazards.map(h => `<span class="tag bad">${h}</span>`).join('') : ''}${s.snowDepth > 0.01 ? `<span class="tag">Snow ${U.cm(s.snowDepth * 100)}</span>` : ''}${s.fog > 0.4 ? '<span class="tag ok">Fog possible</span>' : ''}`;
+      ${s.hazards.length ? s.hazards.map(h => `<span class="tag bad">${h}</span>`).join('') : ''}${s.snowDepth > 0.01 ? `<span class="tag">Snow ${U.cm(s.snowDepth * 100)}</span>` : ''}${s.fog > 0.4 ? '<span class="tag ok">Fog possible</span>' : ''}${s.horizon == null ? '<span class="tag">Horizon not checked</span>' : s.horizonWorst > 8 ? `<span class="tag ok">Obstructed up to ${Math.round(s.horizonWorst)}° in places</span>` : s.horizon > 0.85 ? '<span class="tag good">Open horizon</span>' : ''}${s.hazards.length || s.snowDepth > 0.01 ? '' : ''}`;
     const act = el('div', { class: 'row' });
     act.append(el('button', { class: 'btn', onclick: e => { e.stopPropagation(); open3D({ lat: s.p[0], lon: s.p[1], name: `Spot #${i + 1}` }); } }, '3D view'),
       el('a', { class: 'btn', href: `https://maps.apple.com/?daddr=${s.p[0]},${s.p[1]}&dirflg=d`, target: '_blank' }, 'Apple Maps'),
@@ -574,6 +614,12 @@ async function runSprites() {
     prog('Loading night lights…');
     const regional = await loadRegionalLights(home[0], home[1], maxD + 200).catch(() => null);
     const res = await findSprites(home, { night, regional, maxDriveKm: maxD }, prog);
+    // put each viewing spot on a drivable road (never in a lake)
+    if (res.best.length) {
+      prog('Snapping viewing spots to roads…');
+      const dt = await driveTable(home, res.best.map(r => r.p));
+      res.best = res.best.filter((r, i) => { const d = dt[i]; if (!d || !d.snap || d.snapDist > 3000) return false; r.p = d.snap; r.drive = d.dur; return true; });
+    }
     S.spriteRes = res; listSprites(res, night);
   } catch (e) { console.error(e); prog('Sprite search failed: ' + e.message); }
 }

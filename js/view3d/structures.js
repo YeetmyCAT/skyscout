@@ -40,7 +40,7 @@ export function lighting() {
 
 function buildingMaterial(U) {
   return new THREE.ShaderMaterial({
-    uniforms: U,
+    uniforms: U, side: THREE.DoubleSide,
     vertexShader: LIT_VS,
     fragmentShader: COMMON + lighting() + /* glsl */`
       in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vInfo;
@@ -54,7 +54,7 @@ function buildingMaterial(U) {
       }
       void main(){
         #include <logdepthbuf_fragment>
-        vec3 n = normalize(vN);
+        vec3 n = normalize(vN); if (!gl_FrontFacing) n = -n;
         float seed = vInfo.x, kind = vInfo.y, roof = vInfo.z;
         vec3 alb; vec3 emit = vec3(0.0);
         if (roof > 0.5){
@@ -184,7 +184,7 @@ export function lightPoints(U, list, opts = {}) {
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
-        vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r > 1.0) discard; gl_FragColor = vec4(vC*exp(-r*4.0)*1.8, 1.0); }`,
+        vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r > 1.0) discard; gl_FragColor = vec4(min(vC*exp(-r*4.0)*1.8, vec3(3.0e4)), 1.0); }`,
   });
   const p = new THREE.Points(g, mat); p.frustumCulled = false; return p;
 }
@@ -195,17 +195,20 @@ export function ringLocal(local, ring) {
   return pts;
 }
 export function area(p) { let a = 0; for (let i = 0; i < p.length; i++) { const j = (i + 1) % p.length; a += p[i][0] * p[j][1] - p[j][0] * p[i][1]; } return a / 2; }
+function segDist(x, z, a, b) { const dx = b[0] - a[0], dz = b[1] - a[1], l = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l)); return Math.hypot(x - a[0] - t * dx, z - a[1] - t * dz); }
 export function pointInPoly(x, z, p) { let c = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { if (((p[i][1] > z) !== (p[j][1] > z)) && (x < (p[j][0] - p[i][0]) * (z - p[i][1]) / (p[j][1] - p[i][1]) + p[i][0])) c = !c; } return c; }
 
 export class Structures {
   constructor(U, local, ground, ctx) {
     this.U = U; this.local = local; this.ground = ground; this.ctx = ctx; this.group = new THREE.Group();
     this.anim = []; this.lamps = []; this.areas = [];
+    this.col = { polys: [], circles: [] };   // simple collision shapes in the ground plane
   }
   build(osm) {
     const t0 = performance.now();
     this.buildBuildings(osm.buildings);
     this.buildTrees(osm);
+    this.buildWater(osm.water || [], osm.rivers || []);
     this.buildRoads(osm.roads);
     this.buildLamps(osm);
     this.buildPower(osm.powerLines);
@@ -213,12 +216,32 @@ export class Structures {
     this.buildTowers(osm.towers);
     this.buildAreas(osm);
     this.ground.setLights(this.lamps, this.areas);
+    this.buildColliderGrid();
     const pts = this.lamps.filter(l => l.glow !== false).map(l => ({ x: l.x, y: l.y, z: l.z, cd: l.cd, c: l.cc || [1, 0.75, 0.45], blink: l.blink }));
     this.glow = lightPoints(this.U, pts); this.group.add(this.glow);
     this.stats = { buildings: osm.buildings.length, trees: this.treeCount, lamps: this.lamps.length, ms: Math.round(performance.now() - t0) };
     return this;
   }
   h(x, z) { return this.ground.heightAt(x, z); }
+  buildColliderGrid() {
+    const G = this.colGrid = new Map(), C = 25, key = (i, j) => i + ',' + j;
+    const add = (o, x0, x1, z0, z1) => { for (let i = Math.floor(x0 / C); i <= Math.floor(x1 / C); i++) for (let j = Math.floor(z0 / C); j <= Math.floor(z1 / C); j++) { const k = key(i, j); let a = G.get(k); if (!a) G.set(k, a = []); a.push(o); } };
+    for (const b of this.col.polys) add(b, b.x0, b.x1, b.z0, b.z1);
+    for (const c of this.col.circles) add(c, c.x - c.r, c.x + c.r, c.z - c.r, c.z + c.r);
+  }
+  // true if a viewer of radius r at (x, z) with eye height y would be inside something
+  blocked(x, z, y, r = 0.35) {
+    const a = this.colGrid && this.colGrid.get(Math.floor(x / 25) + ',' + Math.floor(z / 25)); if (!a) return false;
+    for (const o of a) {
+      if (y > o.top) continue;
+      if (o.p) {
+        if (x < o.x0 - r || x > o.x1 + r || z < o.z0 - r || z > o.z1 + r) continue;
+        if (pointInPoly(x, z, o.p)) return true;
+        for (let i = 0, j = o.p.length - 1; i < o.p.length; j = i++) if (segDist(x, z, o.p[j], o.p[i]) < r) return true;
+      } else if ((x - o.x) ** 2 + (z - o.z) ** 2 < (o.r + r) ** 2) return true;
+    }
+    return false;
+  }
 
   buildBuildings(list) {
     const pos = [], nor = [], uv = [], info = [];
@@ -227,7 +250,8 @@ export class Structures {
       const dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1, n = [dz / L, 0, -dx / L];
       const P = [[a[0], y0, a[1]], [b[0], y0, b[1]], [b[0], y1, b[1]], [a[0], y1, a[1]]];
       const UV = [[u0, 0], [u1, 0], [u1, y1 - y0], [u0, y1 - y0]];
-      for (const k of [0, 1, 2, 0, 2, 3]) push(P[k], n, UV[k], inf);
+      // wound so the outward side is the front face (footprints are counter-clockwise, normal points out)
+      for (const k of [0, 2, 1, 0, 3, 2]) push(P[k], n, UV[k], inf);
     };
     const tri = (A, B, C, inf, uvs) => {
       const e1 = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], e2 = [C[0] - A[0], C[1] - A[1], C[2] - A[2]];
@@ -248,6 +272,7 @@ export class Structures {
       let levels = b.levels || (small ? 1 : kind === 2 ? 2 : kind === 1 ? (t === 'apartments' ? 4 : a > 1500 ? 2 : 1) : (a < 60 ? 1 : 2));
       let eave = b.h ? b.h * (kind === 0 && !b.roofShape ? 0.78 : 1) : levels * (kind === 1 ? 3.6 : kind === 2 ? 4.5 : 2.9) + 0.3;
       const ys = p.map(([x, z]) => this.h(x, z)); const base = Math.min(...ys) - 0.5, top = Math.max(...ys) + eave;
+      { let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; p.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }); this.col.polys.push({ p, x0, x1, z0, z1, top: top + 3 }); }
       const floors = Math.max(1, Math.round(eave / (kind ? 3.6 : 2.8)));
       const inf = [seed, kind, 0, floors];
       // walls
@@ -270,7 +295,14 @@ export class Structures {
           tri(V(0), V(1), R1, rinf); tri(V(0), R1, R2, rinf); tri(V(2), V(3), R2, rinf); tri(V(2), R2, R1, rinf);
           // gable ends are wall
           const ginf = inf; const g1 = [V(1), V(2), R1], g2 = [V(3), V(0), R2];
-          for (const G of [g1, g2]) { const e = [G[1][0] - G[0][0], G[1][2] - G[0][2]], L = Math.hypot(...e) || 1; const n = [e[1] / L, 0, -e[0] / L]; push(G[0], n, [0, eave], ginf); push(G[1], n, [L, eave], ginf); push(G[2], n, [L / 2, eave + ridgeH], ginf); }
+          for (const G of [g1, g2]) {
+            const e = [G[1][0] - G[0][0], G[1][2] - G[0][2]], L = Math.hypot(...e) || 1; const n = [e[1] / L, 0, -e[0] / L];
+            // front face must match the outward normal
+            const e1 = [G[1][0] - G[0][0], G[1][1] - G[0][1], G[1][2] - G[0][2]], e2 = [G[2][0] - G[0][0], G[2][1] - G[0][1], G[2][2] - G[0][2]];
+            const cx = e1[1] * e2[2] - e1[2] * e2[1], cz = e1[0] * e2[1] - e1[1] * e2[0];
+            const T = (cx * n[0] + cz * n[2]) >= 0 ? [G[0], G[1], G[2]] : [G[0], G[2], G[1]], TU = (cx * n[0] + cz * n[2]) >= 0 ? [[0, eave], [L, eave], [L / 2, eave + ridgeH]] : [[0, eave], [L / 2, eave + ridgeH], [L, eave]];
+            for (let k = 0; k < 3; k++) push(T[k], n, TU[k], ginf);
+          }
         }
       } else if (pitched && p.length <= 12) {
         let cx = 0, cz = 0; p.forEach(q => { cx += q[0]; cz += q[1]; }); cx /= p.length; cz /= p.length;
@@ -346,6 +378,7 @@ export class Structures {
         const M = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
         list.forEach((t, i) => {
           const H = t.h || (kind ? 14 : 12) * (0.65 + hash(i * 3 + kind) * 0.7);
+          if (part === 1) this.col.circles.push({ x: t.x, z: t.z, r: kind ? 0.9 : 0.6, top: this.h(t.x, t.z) + H });
           q.setFromAxisAngle(up, hash(i * 5) * 6.28);
           s.set(H * (0.9 + hash(i * 9) * 0.25), H, H * (0.9 + hash(i * 13) * 0.25));
           p.set(t.x, this.h(t.x, t.z) - 0.3, t.z);
@@ -362,6 +395,45 @@ export class Structures {
     mk(dec, decCrown, trunk, 0); mk(con, conCrown, trunk.clone(), 1);
   }
 
+  // Lakes, ponds and rivers from OSM: flat reflective water at the shoreline height.
+  buildWater(polys, rivers) {
+    const pos = [], half = this.ctx.detail * 4;
+    const near = pts => pts.some(([x, z]) => Math.abs(x) < half && Math.abs(z) < half);
+    for (const w of polys) {
+      const p = ringLocal(this.local, w.ring); if (p.length < 3 || !near(p)) continue;
+      let lvl = 1e9; for (let i = 0; i < p.length; i += Math.max(1, Math.floor(p.length / 40))) lvl = Math.min(lvl, this.h(p[i][0], p[i][1]));
+      const tris = THREE.ShapeUtils.triangulateShape(p.map(q => new THREE.Vector2(q[0], q[1])), []);
+      for (const [i, j, k] of tris) for (const m of [i, k, j]) pos.push(p[m][0], lvl + 0.15, p[m][1]);
+    }
+    for (const r of rivers) {
+      const p = ringLocalLine(this.local, r.line); if (p.length < 2 || !near(p)) continue;
+      const hw = r.w / 2;
+      for (let i = 0; i < p.length - 1; i++) {
+        const a = p[i], b = p[i + 1], dx = b[0] - a[0], dz = b[1] - a[1], L = Math.hypot(dx, dz) || 1, nx = -dz / L * hw, nz = dx / L * hw;
+        const ya = this.h(a[0], a[1]) + 0.2, yb = this.h(b[0], b[1]) + 0.2;
+        pos.push(a[0] + nx, ya, a[1] + nz, b[0] - nx, yb, b[1] - nz, a[0] - nx, ya, a[1] - nz, a[0] + nx, ya, a[1] + nz, b[0] + nx, yb, b[1] + nz, b[0] - nx, yb, b[1] - nz);
+      }
+    }
+    if (!pos.length) return;
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(pos.length).map((_, i) => i % 3 === 1 ? 1 : 0), 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(pos.length / 3 * 2), 2));
+    g.setAttribute('aInfo', new THREE.Float32BufferAttribute(new Float32Array(pos.length / 3 * 4), 4));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: this.U, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+      vertexShader: LIT_VS,
+      fragmentShader: COMMON + /* glsl */`
+        in vec3 vW; in vec3 vN; in vec2 vUv; in vec4 vInfo;
+        #include <logdepthbuf_pars_fragment>
+        void main(){
+          #include <logdepthbuf_fragment>
+          vec3 col = waterShade(vW, 0.5);
+          col = mix(col, vec3(0.8, 0.83, 0.88) * skyL(vec3(0.0, 1.0, 0.0)) * PI * 0.25, smoothstep(0.6, 0.9, uSnow));
+          gl_FragColor = vec4(aerial(col, normalize(vW - cameraPosition), length(vW - cameraPosition)), 1.0);
+        }`,
+    });
+    const m = new THREE.Mesh(g, mat); m.frustumCulled = false; this.group.add(m);
+  }
   buildRoads(roads) {
     const W = { motorway: 15, trunk: 13, primary: 10, secondary: 9, tertiary: 8, unclassified: 6, residential: 6.5, living_street: 5, service: 4, motorway_link: 6, trunk_link: 6, primary_link: 6 };
     const half = this.ctx.detail * 2.4;
@@ -444,7 +516,7 @@ export class Structures {
         #include <logdepthbuf_pars_fragment>
         void main(){
           #include <logdepthbuf_fragment>
-          vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r > 1.0) discard; gl_FragColor = vec4(vC*exp(-r*4.0)*1.8, 1.0); }`,
+          vec2 p = gl_PointCoord*2.0-1.0; float r = dot(p,p); if (r > 1.0) discard; gl_FragColor = vec4(min(vC*exp(-r*4.0)*1.8, vec3(3.0e4)), 1.0); }`,
     });
     this.carPts = new THREE.Points(g, mat); this.carPts.frustumCulled = false; this.group.add(this.carPts);
     this.anim.push(t => this.updateCars(t));
@@ -475,7 +547,7 @@ export class Structures {
       const led = hash(Math.round(x * 3.1 + z * 7.7)) < this.ctx.ledShare;
       const y = this.h(x, z);
       this.lamps.push({ x, z, y: y + 8.5, cd: led ? 2200 : 1800, r: 24, i: led ? 0.65 : 0.75, c: led ? LED : HPS, cc: led ? [0.95, 0.95, 1] : [1, 0.62, 0.28], mapped });
-      poles.push([x, y, z]);
+      poles.push([x, y, z]); this.col.circles.push({ x, z, r: 0.35, top: y + 8.6 });
     };
     for (const l of osm.lamps) { const [x, y] = this.local.toXY(l.p[0], l.p[1]); addLamp(x, -y, true); }
     // estimated lamps along urban or lit roads where none are mapped
@@ -521,7 +593,7 @@ export class Structures {
       const arms = major ? [[-7, H - 4], [0, H - 1.5], [7, H - 4]] : [[-1, H - 0.4], [0, H], [1, H - 0.4]];
       const tops = p.map((q, i) => {
         const a = p[Math.max(0, i - 1)], b = p[Math.min(p.length - 1, i + 1)], dx = b[0] - a[0], dz = b[1] - a[1], l = Math.hypot(dx, dz) || 1;
-        const inR = Math.abs(q[0]) < range && Math.abs(q[1]) < range; const y = inR ? this.h(q[0], q[1]) : 0; if (inR) (major ? towers : poles).push([q[0], y, q[1], Math.atan2(dx, dz)]);
+        const inR = Math.abs(q[0]) < range && Math.abs(q[1]) < range; const y = inR ? this.h(q[0], q[1]) : 0; if (inR) { (major ? towers : poles).push([q[0], y, q[1], Math.atan2(dx, dz)]); this.col.circles.push({ x: q[0], z: q[1], r: major ? 4.5 : 0.4, top: y + H }); }
         if (!inR) return null;
         return { x: q[0], y, z: q[1], nx: -dz / l, nz: dx / l };
       });
@@ -559,7 +631,7 @@ export class Structures {
     for (const t of list) {
       const [x, y] = this.local.toXY(t.p[0], t.p[1]), z = -y;
       if (Math.hypot(x, z) > 30000) continue;
-      const g = this.h(x, z); tow.push({ x, g, z, h: t.h, D: t.rotor });
+      const g = this.h(x, z); tow.push({ x, g, z, h: t.h, D: t.rotor }); this.col.circles.push({ x, z, r: 3, top: g + t.h });
       this.lamps.push({ x, z, y: g + t.h + 3, cd: 2000, r: 1, i: 0, c: [0, 0, 0], cc: [1, 0.05, 0.02], blink: 1 });
     }
     const towerGeo = mergeGeos([new THREE.CylinderGeometry(0.018, 0.035, 1, 10).translate(0, 0.5, 0), new THREE.BoxGeometry(0.05, 0.035, 0.11).translate(0, 1.0, 0.02)]);
@@ -589,7 +661,7 @@ export class Structures {
     const by = {};
     for (const t of list) {
       const [x, y] = this.local.toXY(t.p[0], t.p[1]), z = -y; if (Math.hypot(x, z) > 25000) continue;
-      const g = this.h(x, z); (by[t.kind] = by[t.kind] || []).push({ x, z, g, h: t.h });
+      const g = this.h(x, z); (by[t.kind] = by[t.kind] || []).push({ x, z, g, h: t.h }); this.col.circles.push({ x, z, r: /storage_tank/.test(t.kind) ? t.h * 0.9 : /silo|water/.test(t.kind) ? Math.max(2, t.h * 0.2) : Math.max(0.8, t.h * 0.03), top: g + t.h });
       if (t.h > 45 && /mast|tower|chimney/.test(t.kind)) {
         const flashing = t.h > 150; // tall masts: flashing red; others steady
         for (let f = 1; f <= Math.max(1, Math.floor(t.h / 60)); f++) this.lamps.push({ x, z, y: g + t.h * f / Math.max(1, Math.floor(t.h / 60)), cd: f === Math.floor(t.h / 60) ? 2000 : 300, r: 1, i: 0, c: [0, 0, 0], cc: [1, 0.05, 0.02], blink: flashing ? 1 : 0 });

@@ -21,7 +21,7 @@ export async function driveTable(home, dests) {
     const coords = [home, ...D].map(p => `${p[1].toFixed(5)},${p[0].toFixed(5)}`).join(';');
     try {
       const r = await cachedJSON(`osrmt:${coords.length}:${coords.slice(0, 60)}:${coords.slice(-40)}`, `${OSRM}/table/v1/driving/${coords}?sources=0&annotations=duration,distance`, 7 * 864e5, { timeout: 40000 });
-      D.forEach((_, k) => { const d = r.data.durations?.[0]?.[k + 1], m = r.data.distances?.[0]?.[k + 1]; if (d != null) out[i + k] = { dur: d, dist: m }; });
+      D.forEach((_, k) => { const d = r.data.durations?.[0]?.[k + 1], m = r.data.distances?.[0]?.[k + 1], dst = r.data.destinations?.[k + 1]; if (d != null) out[i + k] = { dur: d, dist: m, snap: dst ? [dst.location[1], dst.location[0]] : null, snapDist: dst ? dst.distance : 0 }; });
     } catch { }
   }
   return out;
