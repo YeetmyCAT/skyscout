@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>SkyScout</title>
+<meta name="description" content="Cloud, weather and night-sky forecaster with a 3D sky preview, light pollution, dark-site scouting and sprite forecasts.">
+<meta name="theme-color" content="#0b1020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SkyScout">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="offline" class="hidden"></div>
+<header id="top">
+  <div class="brand"><svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15.5 6.5a6.5 6.5 0 1 0 2 8.5 5 5 0 0 1-2-8.5z" fill="currentColor"/></svg><span>SkyScout</span></div>
+  <form id="search" autocomplete="off"><input id="q" type="search" placeholder="Search a place…" enterkeyhint="search"><div id="sugg" class="hidden"></div></form>
+  <button id="locate" class="icon" title="Use my location" aria-label="Use my location"><svg viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="3.2" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+  <button id="settingsBtn" class="icon" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1L15 3h-4l-.4 2.6a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1L11 21h4l.4-2.6a7 7 0 0 0 1.7-1l2.4 1 2-3.4zM13 15.5A3.5 3.5 0 1 1 13 8.5a3.5 3.5 0 0 1 0 7z"/></svg></button>
+</header>
+
+<main id="app">
+  <div id="map"></div>
+  <div id="layersCard" class="card floating">
+    <div class="cardhead">Map layers</div>
+    <label><input type="radio" name="base" value="dark" checked> Dark map</label>
+    <label><input type="radio" name="base" value="streets"> Streets</label>
+    <label><input type="radio" name="base" value="imagery"> Satellite photo</label>
+    <hr>
+    <label><input type="checkbox" data-ov="ir" checked> Live satellite clouds (IR)</label>
+    <label><input type="checkbox" data-ov="geocolor"> Live satellite colour</label>
+    <label><input type="checkbox" data-ov="radar"> Live radar</label>
+    <label><input type="checkbox" data-ov="cloudfc"> Cloud forecast at slider time</label>
+    <label><input type="checkbox" data-ov="lights"> Night lights (VIIRS)</label>
+    <label><input type="checkbox" data-ov="traffic"> Live traffic (TomTom key)</label>
+    <div class="small muted" id="layerNote"></div>
+  </div>
+  <button id="layersBtn" class="fab" title="Layers"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 3 2 8.5 12 14l10-5.5zM4.3 12.6 2 13.9 12 19.4l10-5.5-2.3-1.3L12 16.8z"/></svg></button>
+
+  <aside id="panel" class="sheet">
+    <div class="grab"></div>
+    <nav class="tabs">
+      <button data-tab="cond" class="on">Conditions</button>
+      <button data-tab="scout">Best spots</button>
+      <button data-tab="sprites">Sprites</button>
+    </nav>
+    <section id="tab-cond" class="tab on"><div class="empty">Tap the map or search a place to see the sky forecast there.</div></section>
+    <section id="tab-scout" class="tab"></section>
+    <section id="tab-sprites" class="tab"></section>
+  </aside>
+
+  <div id="view3d" class="hidden">
+    <div class="hud hud-top">
+      <button id="close3d" class="pill">✕ Map</button>
+      <div class="hud-title"><b id="h3dName"></b><span id="h3dTime"></span></div>
+      <button id="menu3dBtn" class="pill">☰ View</button>
+    </div>
+    <div id="menu3d" class="hud card hidden">
+      <div class="cardhead">Overlays</div>
+      <div class="chips" id="ovChips"></div>
+      <div class="cardhead">3D structures</div>
+      <div class="row"><button id="loadStruct" class="btn primary">Load buildings, trees, lights, power lines</button></div>
+      <div class="row small"><label>Detail radius <select id="structDetail"><option value="700">0.7 km (fast)</option><option value="1500" selected>1.5 km</option><option value="2500">2.5 km</option><option value="4000">4 km (heavy)</option></select></label></div>
+      <div class="row small"><label><input type="checkbox" id="estTrees" checked> Add unmapped trees seen in aerial photos</label></div>
+      <div class="row small"><label><input type="checkbox" id="estLamps" checked> Add likely street lights on lit urban roads</label></div>
+      <div class="small muted" id="structStatus"></div>
+      <div class="cardhead">Look</div>
+      <div class="row"><label>Exposure <input type="range" id="ev" min="-3" max="3" step="0.25" value="0"></label></div>
+      <div class="row chips"><button class="chip" id="modeEye">👁 Eye</button><button class="chip" id="modeCam">📷 Camera 20 s</button></div>
+      <div class="row"><label>Viewer height <select id="eyeH"><option value="1.7">Standing 1.7 m</option><option value="4">Car roof 4 m</option><option value="12">Rooftop 12 m</option><option value="60">Drone 60 m</option><option value="300">High 300 m</option></select></label></div>
+      <div class="row chips"><button class="chip" id="gyroBtn">📱 Look with phone</button><button class="chip" id="soundBtn">🔈 Sound</button><button class="chip" id="spriteSim">🔴 Simulate sprites</button></div>
+      <div class="row"><label>Quality <select id="quality"><option value="low">Low</option><option value="med" selected>Medium</option><option value="high">High</option></select></label></div>
+    </div>
+    <div class="hud hud-center"><div class="reticle"></div></div>
+    <div class="hud hud-read" id="read3d"></div>
+    <div class="hud card hidden" id="pick3d"></div>
+    <div id="load3d" class="hud loading hidden"><div class="spin"></div><div id="load3dTxt">Loading…</div></div>
+  </div>
+
+  <footer id="timebar">
+    <button id="nowBtn" class="pill" title="Now">Now</button>
+    <button id="tonightBtn" class="pill" title="Darkest time tonight">Tonight</button>
+    <div class="tl"><input type="range" id="time" min="0" max="288" step="1" value="0"><canvas id="tlCanvas"></canvas></div>
+    <div id="timeLbl"></div>
+    <button id="playBtn" class="pill" title="Play time-lapse">▶</button>
+  </footer>
+</main>
+
+<div id="settings" class="modal hidden">
+  <div class="card">
+    <div class="cardhead">Settings</div>
+    <label class="row">TomTom API key (optional, for live traffic and traffic-aware routes)<input id="ttKey" type="text" placeholder="paste key" autocomplete="off"></label>
+    <p class="small muted">Free keys come from developer.tomtom.com. Without a key, drive times use OSRM routing with a typical-traffic estimate for the time of day.</p>
+    <label class="row">Units <select id="units"><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
+    <div class="row"><button id="clearCache" class="btn">Clear saved data</button> <button id="closeSettings" class="btn primary">Done</button></div>
+    <p class="small muted">Data: Open-Meteo (ECMWF, GFS, ICON, GEM, UKMO, Météo-France, JMA, CAMS), NASA GIBS (GOES, Himawari, VIIRS Black Marble), Mapzen/AWS Terrain Tiles, Esri World Imagery, © OpenStreetMap contributors (Overpass), OSRM, RainViewer. Astronomy: astronomy-engine. Stars: Hipparcos via d3-celestial.</p>
+  </div>
+</div>
+
+<script src="vendor/astronomy.browser.min.js"></script>
+<script src="vendor/leaflet/leaflet.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
