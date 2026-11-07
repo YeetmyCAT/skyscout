@@ -38,7 +38,8 @@ On the same Wi-Fi you can also open `http://<this PC's IP>:8133` on the phone. T
 
 ## Notes
 
-- All data is free and needs no key, except optional TomTom traffic. The free Open-Meteo tier allows roughly 10,000 calls a day. A full scout or sprite search uses a few hundred to about a thousand, and results are cached for about 45 minutes.
+- All data is free and needs no key, except optional TomTom traffic. The free Open-Meteo tier allows roughly 10,000 calls a day. A full scout or sprite search uses a few hundred to about a thousand, and results are cached for about 45 minutes. When that limit is used up, forecasts switch to a lower-quality backup (MET Norway worldwide, plus the US National Weather Service inside the US) with no daily limit, and the app says so on screen.
+- Unmapped trees come from tree crowns detected in ~1 m Esri aerial photos (darker, less saturated vegetation than the lawn around it). It is conservative: uncertain spots get no tree, and leafless crowns in winter photos are often skipped.
 - No geostationary infrared layer exists for Europe and Africa on NASA GIBS, so clouds there come from the models only.
 - Light pollution is calibrated against known sky-quality readings. Expect about ±0.5 mag/arcsec² error.
 

@@ -164,10 +164,11 @@ export class Immersive {
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; }
     const farms = new Farms(this.U, ctx.local, this.ground, { detail: opts.detail, mobile: this.mobile }).build(osm.farms || []);
     this.farms = farms; farms.setDate(ctx.lat, this.date, this.season); this.main.add(farms.group);
-    if (osm.overture) this.ground.setCover(osm.overture.cover);
+    // land cover (Overture) plus parks, sports grounds and cemeteries from both maps
+    { const c = (osm.overture && osm.overture.cover) || { grass: [], tree: [] }; this.ground.setCover({ ...c, parks: [...(c.parks || []), ...(osm.parks || []).map(p => p.ring)] }); }
     if (this.grass) { this.grass.exclude = (x, z) => farms.isCrop(x, z) || (this.structures && this.structures.onPavement(x, z, 0.6)); this.grass.center = null; }
     const s = new Structures(this.U, ctx.local, this.ground, {
-      extraTrees: farms.orchardTrees,
+      extraTrees: farms.orchardTrees, canopyTrees: opts.canopyTrees || null, farms,
       detail: opts.detail, mobile: this.mobile, imageryTrees: opts.imageryTrees !== false, estimateLamps: opts.estimateLamps !== false,
       urbanAt: opts.urbanAt || (() => 0), ledShare: opts.ledShare ?? 0.6, coniferShare: opts.coniferShare ?? 0.3,
       windDir: val(ctx.point, 'wind_direction_10m', this.unix) ?? 270, windSpeed: (val(ctx.point, 'wind_speed_10m', this.unix) ?? 15) / 3.6,
@@ -440,6 +441,9 @@ export class Immersive {
   }
   stop() { this.running = false; cancelAnimationFrame(this.raf); this.audio.disable(); }
   frame() {
+    // keep the render buffers the exact shape of the screen: on iPhones the app's height changes without a resize
+    // event (keyboard, toolbar, rotation), and a mismatched buffer turns every star into an oval
+    if (this.size && (Math.max(2, Math.floor(this.el.clientWidth * this.q.dpr)) !== this.size[0] || Math.max(2, Math.floor(this.el.clientHeight * this.q.dpr)) !== this.size[1])) this.resize();
     const dt = Math.min(0.1, this.clock.getDelta()), U = this.U, cam = this.camera;
     const now = performance.now() / 1000; U.uTime.value = now;
     // movement

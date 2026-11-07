@@ -72,12 +72,30 @@ function setTime(d, from) {
   if (S.view && S.view.running && from === 'play') S.view.setTime(S.time);
 }
 
+const fmtWait = w => w > 3600e3 ? `${Math.floor(w / 3600e3)} h ${Math.floor(w % 3600e3 / 60e3)} min` : `${Math.ceil(w / 60e3)} min`;
+// Banner: stays up for as long as the condition lasts (other popups draw over it).
 function updateOffline() {
-  const b = $('#offline');
-  if (!Net.online) { b.textContent = `You're offline — showing the last data saved ${Net.lastOnline ? fmtAgo(Net.lastOnline) : ''}`; b.classList.remove('hidden'); }
-  else if (S.data && S.data.point.stale) { const w = RateLimit.waitMs(); b.textContent = w > 0 ? `Free weather service limit reached (resets in ${w > 3600e3 ? Math.round(w / 3600e3) + ' h' : Math.ceil(w / 60e3) + ' min'}) — showing the forecast saved ${fmtAgo(S.data.point.fetched)}` : `Couldn't reach the forecast servers — showing data from ${fmtAgo(S.data.point.fetched)}`; b.classList.remove('hidden'); }
-  else b.classList.add('hidden');
+  const b = $('#offline'), w = RateLimit.waitMs(), P = S.data && S.data.point;
+  let txt = '';
+  if (!Net.online) txt = `You're offline — showing the last data saved ${Net.lastOnline ? fmtAgo(Net.lastOnline) : ''}`;
+  else if (w > 0) {
+    const head = `Free 7-model weather limit reached · back in ${fmtWait(w)}`;
+    if (P && P.backup) txt = `${head} — using the lower-quality backup forecast (${P.models.map(m => m === 'nws' ? 'US NWS' : 'MET Norway').join(' + ')})`;
+    else if (P && P.stale) txt = `${head} — showing the forecast saved ${fmtAgo(P.fetched)}`;
+    else if (P) txt = `${head} — this forecast was saved ${fmtAgo(P.fetched)}`;
+    else txt = `${head} — new forecasts use a lower-quality backup until then`;
+  } else if (P && P.backup) txt = 'The full 7-model forecast is available again — tap here to update this place';
+  else if (P && P.stale) txt = `Couldn't reach the forecast servers — showing data from ${fmtAgo(P.fetched)}`;
+  b.textContent = txt; b.classList.toggle('hidden', !txt);
+  const canUpgrade = Net.online && w === 0 && P && P.backup;
+  b.classList.toggle('tap', !!canUpgrade);
+  b.onclick = canUpgrade ? async () => {
+    const tok = selToken, { lat, lon } = S.sel; b.textContent = 'Loading 7 weather models…';
+    try { const [point, aq] = await Promise.all([pointForecast(lat, lon), airQuality(lat, lon)]); if (tok === selToken) await showForecast(tok, point, aq); }
+    catch { updateOffline(); }
+  } : null;
 }
+setInterval(updateOffline, 30e3);
 
 // ---------------- UI wiring ----------------
 function setupUI() {
@@ -164,7 +182,7 @@ function updateFetchButton() {
     const w = RateLimit.waitMs();
     if (w > 0) {
       const sec = Math.ceil(w / 1000), txt = sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-      b.disabled = true; b.textContent = `Free weather service limit reached: try again in ${txt}`;
+      b.disabled = false; b.textContent = `Fetch backup forecast (lower quality) · full 7-model forecast back in ${txt}`;
     } else {
       const left = Math.floor(RateLimit.remaining() / POINT_WEIGHT);
       b.disabled = false; b.textContent = `Fetch forecast · about ${left} left before the free limit`;
@@ -174,14 +192,14 @@ function updateFetchButton() {
 }
 async function fetchForecast(tok) {
   const { lat, lon } = S.sel, note = $('#fetchNote');
-  $('#fetchBtn').disabled = true; $('#fetchBtn').textContent = 'Loading 7 weather models…';
+  $('#fetchBtn').disabled = true; $('#fetchBtn').textContent = RateLimit.waitMs() > 0 ? 'Loading the backup forecast (MET Norway, US NWS)…' : 'Loading 7 weather models…';
   try {
     const [point, aq] = await Promise.all([pointForecast(lat, lon), airQuality(lat, lon)]);
     if (tok !== selToken) return;
     await showForecast(tok, point, aq);
   } catch (e) {
     console.error(e);
-    if (note) note.textContent = e.rateLimited ? 'The free weather service is pausing requests from this device.' : `Couldn't load the forecast (${e.message}). ${Net.online ? 'Try again in a moment.' : 'You are offline and nothing is saved for this place yet.'}`;
+    if (note) note.textContent = e.rateLimited ? 'The free weather service is pausing requests from this device, and the backup forecast could not be reached either.' : `Couldn't load the forecast (${e.message}). ${Net.online ? 'Try again in a moment.' : 'You are offline and nothing is saved for this place yet.'}`;
     updateFetchButton();
   }
 }
@@ -268,7 +286,8 @@ function renderConditions() {
     : `<div class="small muted">${d.lights === null ? 'Loading night-lights data…' : 'Night-lights data unavailable.'}</div>`;
   box.innerHTML = `
     <div class="place">${S.sel.name}</div>
-    <div class="sub">${d.lat.toFixed(4)}, ${d.lon.toFixed(4)} · ${U.m(P.elevation)} · ${P.models.length} models: ${P.models.map(m => MODEL_NAMES[m]).join(', ')}</div>
+    <div class="sub">${d.lat.toFixed(4)}, ${d.lon.toFixed(4)} · ${U.m(P.elevation)} · ${P.backup ? 'Backup forecast' : `${P.models.length} models`}: ${P.models.map(m => MODEL_NAMES[m]).join(', ')}</div>
+    ${P.backup ? `<div class="warnbox small">Lower-quality backup: the free 7-model service's limit is used up (back in ${fmtWait(RateLimit.waitMs())}). ${P.models.length} source${P.models.length > 1 ? 's' : ''} instead of 7, cloud layers only as low/mid/high, no instability data for storms${P.filled && P.filled.length ? `; cloud heights, snow depth and storm data come from the 7-model forecast saved ${fmtAgo(P.savedAt)}` : ', no snow depth'}.</div>` : ''}
     <div class="score"><div class="num" style="color:${colorFor(ns.score / 100)}">${ns.score}</div>
       <div><b>Astrophotography tonight</b><div class="small muted">${(ns.clear * 100).toFixed(0)}% clear in the dark hours · ${night.darkHours.toFixed(1)} h moon-free darkness${sqm ? ` · Bortle ${bortle(sqm)}` : ''}</div></div></div>
     <button class="btn primary big" id="open3dBtn">Open 3D sky view</button>
@@ -408,7 +427,7 @@ async function updateCloudOverlay(now) {
       const t = S.time.getTime() / 1000, grid = [];
       for (let j = 0; j < n; j++) { grid.push([]); for (let i = 0; i < n; i++) grid[j].push((val(ser[j * n + i], 'cloud_cover', t) ?? 0) / 100); }
       map.setCloudOverlay(grid, [[s0, w], [n0, e]]);
-      $('#layerNote').textContent = `Cloud forecast (3-model mean) for ${fmtDT(S.time, tz())}`;
+      $('#layerNote').textContent = ser[0] && ser[0].backup ? `Cloud forecast (backup: MET Norway, coarser and lower quality) for ${fmtDT(S.time, tz())}` : `Cloud forecast (3-model mean) for ${fmtDT(S.time, tz())}`;
     } catch (e) { $('#layerNote').textContent = 'Cloud forecast unavailable: ' + e.message; }
   }, now ? 0 : 500);
 }
@@ -426,6 +445,7 @@ async function open3D(site) {
   if (!S.data) return;
   const d = S.data, lat = site ? site.lat : d.lat, lon = site ? site.lon : d.lon;
   $('#view3d').classList.remove('hidden'); $('#load3d').classList.remove('hidden'); document.body.classList.add('in3d');
+  $('#view3d').appendChild($('#offline'));   // banner sits under the 3D readouts and menus
   $('#h3dName').textContent = site ? site.name : S.sel.name; showTime();
   const prog = t => { $('#load3dTxt').textContent = t; };
   try {
@@ -442,7 +462,7 @@ async function open3D(site) {
       lp = null; domes = [];
     }
     const local = makeLocal(lat, lon);
-    prog('Loading the 3-model cloud field around you (±120 km)…');
+    prog(RateLimit.waitMs() > 0 ? 'Loading the backup cloud field around you (MET Norway, ±120 km)…' : 'Loading the 3-model cloud field around you (±120 km)…');
     const n = 9, half = 120000, pts = [];
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) pts.push(local.toLL((i / (n - 1) * 2 - 1) * half, (j / (n - 1) * 2 - 1) * half));
     const series = await gridForecast(pts, `3d${lat.toFixed(2)},${lon.toFixed(2)}`).catch(() => null);
@@ -484,7 +504,7 @@ async function open3D(site) {
     console.error(e); prog('Could not build the 3D view: ' + e.message);
   }
 }
-function close3D() { if (S.view) S.view.stop(); $('#view3d').classList.add('hidden'); document.body.classList.remove('in3d'); }
+function close3D() { if (S.view) S.view.stop(); $('#view3d').classList.add('hidden'); document.body.classList.remove('in3d'); document.body.insertBefore($('#offline'), $('#top')); }
 let hudT = 0;
 function hudRead(force) {
   const v = S.view; if (!v) return; const now = performance.now(); if (!force && now - hudT < 200) return; hudT = now;
@@ -537,14 +557,16 @@ async function loadStructuresNow() {
   const detail = +$('#structDetail').value;
   st.textContent = 'Downloading OpenStreetMap buildings, trees, lamps, power lines…';
   try {
-    const [osm, ov] = await Promise.all([loadStructures(v.ctx.lat, v.ctx.lon, detail), loadOverture(v.ctx.lat, v.ctx.lon, detail).catch(() => null)]);
+    const { detectCanopy } = await import('./view3d/canopy.js');
+    const [osm, ov, canopy] = await Promise.all([loadStructures(v.ctx.lat, v.ctx.lon, detail), loadOverture(v.ctx.lat, v.ctx.lon, detail).catch(() => null),
+      $('#estTrees').checked ? detectCanopy(v.ctx.local, Math.min(detail * 1.6, 1200), v.mobile).catch(e => (console.warn('canopy', e), null)) : null]);
     osm.overture = osm.fallback ? { buildings: [], addrs: [], cover: ov ? ov.cover : { grass: [], tree: [] } } : ov;   // fallback scene already is Overture
     st.textContent = `Building 3D models for ${osm.buildings.length} buildings, ${osm.trees.length} mapped trees, ${osm.forests.length} woods…`;
     await new Promise(r => setTimeout(r, 30));
     const lat = v.ctx.lat, al = Math.abs(lat), coniferShare = al > 58 ? 0.92 : al > 50 ? 0.6 : al > 42 ? 0.35 : al < 23 ? 0 : 0.2;
     const urban = v.urban ? ((x, z) => { const [la, lo] = v.ctx.local.toLL(x, -z); return v.urban(la, lo); }) : (() => 0);
-    const stats = v.setStructures(osm, { detail, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
-    st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
+    const stats = v.setStructures(osm, { detail, canopyTrees: canopy, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
+    st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees${canopy ? ` (incl. crowns seen in aerial photos)` : ''}, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
   } catch (e) { st.textContent = 'Could not load map data: ' + e.message; }
   btn.disabled = false;
 }
@@ -584,7 +606,7 @@ async function runScout() {
     const res = await scout(home, { radiusKm, night, regional, departLocal: depart, weights: W, maxDriveH: maxH, allowOffRoad: $('#scRoad').value === 'walk' }, prog);
     res.night = night; res.home = home; res.regional = regional; res.depart = depart;
     S.scoutRes = res; if (!res.sites.length) { prog(`No reachable sites: ${res.candidates} candidates were all on water or more than ${$('#scRoad').value === 'walk' ? '3 km' : '2.5 km'} from a road. Try a longer drive or walk-in spots.`); listScout(); return; }
-    prog(`${res.noRouting ? '⚠ Drive times are straight-line estimates (routing unavailable). ' : ''}Checked ${res.sites.length} reachable sites (${$('#scRoad').value === 'walk' ? 'walk-in spots allowed' : 'all right at a road'}) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
+    prog(`${res.noRouting ? '⚠ Drive times are straight-line estimates (routing unavailable). ' : ''}Checked ${res.sites.length} reachable sites (${$('#scRoad').value === 'walk' ? 'walk-in spots allowed' : 'all right at a road'}) ${res.backup ? 'with the lower-quality backup forecast (MET Norway; the free 7-model service is at its limit)' : 'with 3 models'} for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
     listScout();
   } catch (e) { console.error(e); prog('Scouting failed: ' + e.message); }
 }
@@ -690,6 +712,7 @@ function listSprites(res, night) {
   const z = tz();
   const nStorms = res.stormsByHour.reduce((s, h) => s + h.clusters.length, 0);
   $('#spProg').textContent = res.best.length ? `Found ${res.best.length} viewing spots.` : nStorms ? 'Storms are forecast, but none are well placed with clear sky toward them tonight.' : 'No sprite-capable thunderstorm systems are forecast within range for this night.';
+  if (res.backup) $('#spProg').textContent += ' (Lower-quality backup forecast: the free 7-model service is at its limit, so storms are found only from forecast thunder, without instability data.)'
   box.innerHTML = '';
   // storm cells at the best hour
   const bestT = res.best[0] ? res.best[0].t : (res.stormsByHour.find(h => h.clusters.length) || {}).t;

@@ -119,12 +119,12 @@ export class Ground {
     const half = this.nearHalf, S = 1024, mk = rings => {
       if (!rings || !rings.length) return null;
       const cv = document.createElement('canvas'); cv.width = cv.height = S;
-      const g = cv.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, S, S); g.fillStyle = '#fff'; g.beginPath();
-      for (const r of rings) r.forEach(([la, lo], i) => { const [x, y] = this.local.toXY(la, lo), px = (x + half) / (2 * half) * S, py = (-y + half) / (2 * half) * S; i ? g.lineTo(px, py) : g.moveTo(px, py); });
-      g.fill('evenodd');
+      const g = cv.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, S, S); g.fillStyle = '#fff';
+      // each outline on its own: overlapping areas (a pitch inside a park) must not cancel out as even-odd holes
+      for (const r of rings) { g.beginPath(); r.forEach(([la, lo], i) => { const [x, y] = this.local.toXY(la, lo), px = (x + half) / (2 * half) * S, py = (-y + half) / (2 * half) * S; i ? g.lineTo(px, py) : g.moveTo(px, py); }); g.fill(); }
       return g.getImageData(0, 0, S, S);
     };
-    this.grassMask = mk(cover.grass); this.treeMask = mk(cover.tree);
+    this.grassMask = mk(cover.grass); this.treeMask = mk(cover.tree); this.parkMask = mk(cover.parks);
   }
   maskAt(M, x, z) {
     if (!M || Math.abs(x) > this.nearHalf || Math.abs(z) > this.nearHalf) return null;

@@ -152,7 +152,7 @@ export async function cachedJSON(key, url, ttlMs, opts = {}) {
     idbPut('json', key, { t: Date.now(), data });
     return { data, t: Date.now(), stale: false };
   } catch (e) {
-    if (e.name === 'TypeError' || e.name === 'AbortError') Net.set(navigator.onLine && e.name === 'AbortError');
+    if (!opts.quiet && (e.name === 'TypeError' || e.name === 'AbortError')) Net.set(navigator.onLine && e.name === 'AbortError');
     if (hit) return { data: hit.data, t: hit.t, stale: true };
     throw e;
   }

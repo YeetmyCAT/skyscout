@@ -1,9 +1,10 @@
 // Multi-model weather from Open-Meteo: ensemble means, spread, cloud layers and cloud types.
-import { cachedJSON, mean, std, clamp } from './util.js';
+import { cachedJSON, mean, std, clamp, RateLimit } from './util.js';
+import { backupForecast, backupGrid, BACKUP_NAMES } from './backup.js';
 
 const API = 'https://api.open-meteo.com/v1/forecast';
 export const POINT_MODELS = ['ecmwf_ifs025', 'gfs_seamless', 'icon_seamless', 'gem_seamless', 'ukmo_seamless', 'meteofrance_seamless', 'jma_seamless'];
-export const MODEL_NAMES = { ecmwf_ifs025: 'ECMWF IFS', gfs_seamless: 'NOAA GFS/HRRR', icon_seamless: 'DWD ICON', gem_seamless: 'Canada GEM', ukmo_seamless: 'UK Met Office', meteofrance_seamless: 'Météo-France', jma_seamless: 'JMA' };
+export const MODEL_NAMES = { ecmwf_ifs025: 'ECMWF IFS', gfs_seamless: 'NOAA GFS/HRRR', icon_seamless: 'DWD ICON', gem_seamless: 'Canada GEM', ukmo_seamless: 'UK Met Office', meteofrance_seamless: 'Météo-France', jma_seamless: 'JMA', ...BACKUP_NAMES };
 export const GRID_MODELS = ['ecmwf_ifs025', 'gfs_seamless', 'icon_seamless'];
 export const LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150];
 
@@ -50,20 +51,29 @@ function worstCode(col) {
 }
 
 export const POINT_WEIGHT = POINT_MODELS.length * Math.ceil(([...SURF, ...PL].length) / 10) + 1;
+// A saved 7-model forecast younger than this beats the lower-quality backup.
+const SAVED_OK = 3 * 3600e3;
 export async function pointForecast(lat, lon, opts = {}) {
   const vars = [...SURF, ...PL];
   const key = `pt:${lat.toFixed(2)},${lon.toFixed(2)}`;
   const url = `${API}?latitude=${r4(lat)}&longitude=${r4(lon)}&hourly=${vars.join(',')}&models=${POINT_MODELS.join(',')}&forecast_days=4&past_days=1&timezone=auto&timeformat=unixtime`;
+  const finish = res => { const p = parse(res.data, vars, POINT_MODELS); p.tz = res.data.timezone; p.utcOffset = res.data.utc_offset_seconds; p.fetched = res.t; p.stale = res.stale; return p; };
+  // Open-Meteo's free quota is used up: MET Norway (+ US NWS), with the saved forecast filling the gaps
+  const backup = async saved => {
+    if (saved && Date.now() - saved.t < SAVED_OK) return finish(saved);
+    try { const b = await backupForecast(lat, lon, saved ? finish(saved) : null); b.savedAt = saved ? saved.t : null; return b; }
+    catch (e) { if (saved) return finish(saved); const er = new Error('rate-limited'); er.rateLimited = true; throw er; }
+  };
   let res;
   try { res = await cachedJSON(key, url, 45 * 60e3, opts); }
   catch (e) { // some regions reject a model: retry with the core three
-    if (e.rateLimited || opts.cacheOnly) throw e;
+    if (opts.cacheOnly) throw e;
+    if (e.rateLimited) return backup(null);
     const url2 = url.replace(POINT_MODELS.join(','), GRID_MODELS.join(','));
     res = await cachedJSON(key, url2, 45 * 60e3);
   }
-  const p = parse(res.data, vars, POINT_MODELS);
-  p.tz = res.data.timezone; p.utcOffset = res.data.utc_offset_seconds; p.fetched = res.t; p.stale = res.stale;
-  return p;
+  if (res.stale && !opts.cacheOnly && RateLimit.waitMs() > 0) return backup(res);
+  return finish(res);
 }
 
 // Many points at once (Open-Meteo accepts comma lists). Returns array of parsed series.
@@ -74,7 +84,14 @@ export async function gridForecast(points, tag, opts = {}) {
     const P = points.slice(i, i + chunk);
     const lat = P.map(p => r4(p[0])).join(','), lon = P.map(p => r4(p[1])).join(',');
     const url = `${API}?latitude=${lat}&longitude=${lon}&hourly=${vars.join(',')}&models=${models.join(',')}&forecast_days=4&past_days=1&timezone=GMT&timeformat=unixtime`;
-    const res = await cachedJSON(`grid:${tag}:${i}`, url, 50 * 60e3, { timeout: 60000 });
+    let res = null;
+    try { res = await cachedJSON(`grid:${tag}:${i}`, url, 50 * 60e3, { timeout: 60000 }); }
+    catch (e) { if (!e.rateLimited) throw e; }
+    if (!res || (res.stale && RateLimit.waitMs() > 0 && Date.now() - res.t > SAVED_OK)) {
+      // quota used up: MET Norway on a coarser grid (lower quality)
+      try { out.push(...await backupGrid(P)); continue; }
+      catch (e) { if (!res) throw e; }
+    }
     const arr = Array.isArray(res.data) ? res.data : [res.data];
     for (const j of arr) { const p = parse(j, vars, models); p.fetched = res.t; p.stale = res.stale; out.push(p); }
   }

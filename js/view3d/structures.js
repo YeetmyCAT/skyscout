@@ -363,6 +363,7 @@ export class Structures {
       const [x0, y0] = this.local.toXY(a.p[0], a.p[1]); let x = x0, z = -y0;
       if (Math.abs(x) > half || Math.abs(z) > half) continue;
       if (nearBuilding(x, z, 2)) continue;                              // the address belongs to a mapped building
+      if (this.ground.maskAt(this.ground.parkMask, x, z) === true) continue;   // park, cemetery or sports ground: its address isn't a house
       if (placed.some(q => Math.hypot(q[0] - x, q[1] - z) < 14)) continue;   // same address from several sources, or several in one building
       // nearest road decides which way the house faces
       let best = null, bd = 70;
@@ -553,25 +554,23 @@ export class Structures {
     const ok = (x, z) => Math.abs(x) < half && Math.abs(z) < half;
     for (const t of osm.trees) { const [x, y] = this.local.toXY(t.p[0], t.p[1]); const z = -y; if (ok(x, z)) trees.push({ x, z, h: t.h, kind: t.leaf === 'needleleaved' ? 1 : t.leaf === 'broadleaved' ? 0 : -1 }); }
     for (const t of this.ctx.extraTrees || []) trees.push(t);
-    // fill mapped forests
     const max = this.ctx.mobile ? 9000 : 26000;
     let seed = 1;
-    for (const f of osm.forests) {
-      const p = ringLocal(this.local, f.ring); if (p.length < 3) continue;
-      let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; p.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); });
-      x0 = Math.max(x0, -half); x1 = Math.min(x1, half); z0 = Math.max(z0, -half); z1 = Math.min(z1, half);
-      if (x1 <= x0 || z1 <= z0) continue;
-      const sp = 7.5;
-      for (let x = x0; x < x1; x += sp) for (let z = z0; z < z1; z += sp) {
-        if (trees.length > max) break;
-        const jx = x + (hash(seed++) - 0.5) * sp, jz = z + (hash(seed++) - 0.5) * sp;
-        if (!pointInPoly(jx, jz, p)) continue;
-        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1) || this.nearBuilding(jx, jz, 4.5)) continue;
-        trees.push({ x: jx, z: jz, kind: f.leaf === 'needleleaved' ? 1 : f.leaf === 'broadleaved' ? 0 : -1 });
-      }
-    }
+    // occupancy on a 4 m grid so photo crowns and woods filling don't double up on mapped trees
+    const occ = new Set(), ck = (x, z) => Math.floor(x / 4) + ',' + Math.floor(z / 4);
+    const taken = (x, z) => { const i = Math.floor(x / 4), j = Math.floor(z / 4); for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (occ.has((i + a) + ',' + (j + b))) return true; return false; };
+    for (const t of trees) occ.add(ck(t.x, t.z));
     // estimated trees from aerial imagery (unmapped yard and street trees), near the viewer
-    if (this.ctx.imageryTrees && this.ground.nearPx) {
+    if (this.ctx.imageryTrees && this.ctx.canopyTrees) {
+      // crowns seen in ~1 m aerial photos (parks, yards, streets); skip ones that clash with mapped trees, roads, water or houses
+      for (const t of this.ctx.canopyTrees) {
+        if (trees.length > max) break;
+        if (!ok(t.x, t.z) || taken(t.x, t.z)) continue;
+        if (this.ground.isWater(t.x, t.z) || this.onPavement(t.x, t.z, 1.2) || this.nearBuilding(t.x, t.z, 3.5)) continue;   // also covers "inside a footprint"
+        if (this.ctx.farms && this.ctx.farms.isCrop && this.ctx.farms.isCrop(t.x, t.z)) continue;
+        trees.push(t); occ.add(ck(t.x, t.z));
+      }
+    } else if (this.ctx.imageryTrees && this.ground.nearPx) {
       const r = Math.min(half, 1200), sp = 6;
       for (let x = -r; x < r; x += sp) for (let z = -r; z < r; z += sp) {
         if (trees.length > max) break;
@@ -586,6 +585,21 @@ export class Structures {
         if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1.5) || this.nearBuilding(jx, jz, 4)) continue;
         if (this.buildingPolys && this.buildingPolys.some(bp => bp.length > 2 && Math.abs(bp[0][0] - jx) < 40 && Math.abs(bp[0][1] - jz) < 40 && pointInPoly(jx, jz, bp))) continue;
         trees.push({ x: jx, z: jz, kind: -1, est: true });
+      }
+    }
+    // fill mapped forests
+    for (const f of osm.forests) {
+      const p = ringLocal(this.local, f.ring); if (p.length < 3) continue;
+      let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; p.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); });
+      x0 = Math.max(x0, -half); x1 = Math.min(x1, half); z0 = Math.max(z0, -half); z1 = Math.min(z1, half);
+      if (x1 <= x0 || z1 <= z0) continue;
+      const sp = 7.5;
+      for (let x = x0; x < x1; x += sp) for (let z = z0; z < z1; z += sp) {
+        if (trees.length > max) break;
+        const jx = x + (hash(seed++) - 0.5) * sp, jz = z + (hash(seed++) - 0.5) * sp;
+        if (!pointInPoly(jx, jz, p) || taken(jx, jz)) continue;
+        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1) || this.nearBuilding(jx, jz, 4.5)) continue;
+        trees.push({ x: jx, z: jz, kind: f.leaf === 'needleleaved' ? 1 : f.leaf === 'broadleaved' ? 0 : -1 });
       }
     }
     this.treeCount = trees.length; this.treePts = trees;

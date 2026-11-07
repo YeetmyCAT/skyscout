@@ -1,6 +1,7 @@
 // Best astrophotography sites: weighs clouds (multi-model), darkness (whole sky), moon, fog, transparency,
 // seeing, snow, road conditions and drive time with traffic.
 import { destination, clamp, mean, haversine } from './util.js';
+import { RateLimit } from './util.js';
 import { gridForecast, airQualityGrid, val, fogRisk } from './weather.js';
 import { quickLP, QUICK, NAT_SKY, lum2mag, bortle } from './lightpol.js';
 import { driveTable, congestion, roadWeatherFactor, roadHazards, route } from './routing.js';
@@ -26,7 +27,7 @@ export async function scout(home, opts, progress = () => { }) {
   const W = { clear: 0.36, dark: 0.22, horizon: 0.10, transp: 0.07, fog: 0.07, seeing: 0.04, roads: 0.06, drive: 0.08, ...weights };
   const n = radiusKm > 220 ? 8 : radiusKm > 120 ? 7 : 5;
   const pts = candidateGrid(home, radiusKm, n);
-  progress(`Fetching forecasts for ${pts.length} sites from 3 models…`);
+  progress(RateLimit.waitMs() > 0 ? `Fetching backup forecasts (MET Norway) for ${pts.length} sites…` : `Fetching forecasts for ${pts.length} sites from 3 models…`);
   const wx = await gridForecast(pts, `scout${home[0].toFixed(2)},${home[1].toFixed(2)}:${radiusKm}`, { vars: SCOUT_VARS, chunk: 50 });
   progress('Fetching aerosol forecast…');
   const aq = await airQualityGrid(pts);
@@ -146,7 +147,7 @@ export async function scout(home, opts, progress = () => { }) {
     } catch { }
   }
   all.sort((a, b) => b.score - a.score);
-  return { sites: all, hours, moonW, others: [], noRouting, candidates: res.length };
+  return { sites: all, hours, moonW, others: [], noRouting, candidates: res.length, backup: !!(wx[0] && wx[0].backup) };
 }
 
 // 0..1 urban-ness from night-light radiance, on a 0.05 degree lookup grid.

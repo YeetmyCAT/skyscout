@@ -33,11 +33,14 @@ export async function loadStructures(lat, lon, detail = 1500) {
  way["man_made"~"^(chimney|water_tower|silo|storage_tank)$"](${mid});
  way["power"="plant"](${far}); way["landuse"="industrial"](${mid});
  way["leisure"~"^(pitch|stadium|sports_centre)$"]["lit"="yes"](${mid});
+ way["leisure"~"^(park|playground|pitch|golf_course|recreation_ground|nature_reserve|dog_park|track)$"](${near});
+ relation["leisure"~"^(park|golf_course|nature_reserve|recreation_ground)$"](${near});
+ way["landuse"~"^(cemetery|recreation_ground|village_green)$"](${near});
  way["amenity"="fuel"](${mid}); node["amenity"="fuel"](${mid});
  way["aeroway"~"^(runway|apron)$"](${far});
 );
 out geom qt;`;
-  const key = `osm2:${lat.toFixed(3)},${lon.toFixed(3)}:${detail}`;
+  const key = `osm3:${lat.toFixed(3)},${lon.toFixed(3)}:${detail}`;
   const tryOverpass = async () => {
     let lastErr;
     for (const m of MIRRORS) {
@@ -62,7 +65,7 @@ out geom qt;`;
 const num = v => { if (v == null) return null; const m = String(v).match(/[\d.]+/); return m ? parseFloat(m[0]) : null; };
 
 function classify(data, meta) {
-  const out = { addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
+  const out = { parks: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
   for (const e of data.elements || []) {
     const t = e.tags || {};
     const geom = e.geometry ? e.geometry.map(p => [p.lat, p.lon]) : null;
@@ -80,6 +83,7 @@ function classify(data, meta) {
       const rings = (e.members || []).filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(p => [p.lat, p.lon]));
       if (t.natural === 'water') { for (const r of rings) out.water.push({ ring: r }); continue; }
       if (/farmland|meadow/.test(t.landuse || '')) { for (const r of rings) out.farms.push({ ring: r, kind: t.landuse, crop: t.crop, id: e.id }); continue; }
+      if (t.leisure) { for (const r of rings) out.parks.push({ ring: r }); continue; }
       for (const r of rings) out.forests.push({ ring: r, leaf: t.leaf_type });
       continue;
     }
@@ -99,7 +103,8 @@ function classify(data, meta) {
     else if (t.man_made) out.towers.push({ p: geom[0], ring: geom, kind: t.man_made, h: num(t.height) || ({ chimney: 60, water_tower: 35, silo: 25, storage_tank: 14 }[t.man_made] || 20) });
     else if (t.power === 'plant') out.industrial.push({ ring: geom, plant: true, name: t.name });
     else if (t.landuse === 'industrial') out.industrial.push({ ring: geom });
-    else if (t.leisure) out.lit.push({ ring: geom });
+    else if (/^(park|playground|pitch|golf_course|recreation_ground|nature_reserve|dog_park|track|stadium)$/.test(t.leisure || '') || /^(cemetery|recreation_ground|village_green)$/.test(t.landuse || '')) { out.parks.push({ ring: geom }); if (t.lit === 'yes' && t.leisure) out.lit.push({ ring: geom }); }
+    else if (t.leisure && t.lit === 'yes') out.lit.push({ ring: geom });
     else if (t.amenity === 'parking') { out.parking.push({ ring: geom }); if (!t.parking || /surface|lane/.test(t.parking)) out.paved.push({ ring: geom, kind: 'parking' }); }
     else if (t.amenity === 'fuel') out.fuel.push({ p: geom[0], ring: geom });
     else if (t.aeroway === 'apron') out.paved.push({ ring: geom, kind: 'apron' });
@@ -147,9 +152,10 @@ export async function loadOverture(lat, lon, detail) {
     roofShape: pr.roof_shape, source: String(pr['@geometry_source'] || 'Overture'),
   }));
   const addrs = a.filter(f => f.type === 1).map(f => ({ p: f.rings[0][0], overture: true }));
-  const cover = { grass: [], tree: [], crop: [], urban: [] };
+  const cover = { grass: [], tree: [], crop: [], urban: [], parks: [] };
   for (const f of lc) { if (f.type !== 3) continue; const k = f.props.subtype; if (k === 'grass' || k === 'shrub' || k === 'moss' || k === 'wetland') cover.grass.push(...f.rings); else if (k === 'tree' || k === 'forest' || k === 'mangrove') cover.tree.push(...f.rings); else if (k === 'crop') cover.crop.push(...f.rings); else if (k === 'urban') cover.urban.push(...f.rings); }
-  for (const f of lu) { if (f.type !== 3) continue; const c = (f.props.class || '') + ' ' + (f.props.subtype || ''); if (/bunker|parking|water_hazard/.test(c)) continue; if (/park|grass|golf|fairway|green|tee|rough|cemetery|recreation|meadow|village_green|garden|pitch|playground|lawn|common/.test(c)) cover.grass.push(...f.rings); }
+  for (const f of lu) { if (f.type !== 3) continue; const c = (f.props.class || '') + ' ' + (f.props.subtype || ''); if (/bunker|parking|water_hazard/.test(c)) continue; if (/park|grass|golf|fairway|green|tee|rough|cemetery|recreation|meadow|village_green|garden|pitch|playground|lawn|common/.test(c)) cover.grass.push(...f.rings);
+    if (/park|golf|cemetery|recreation_ground|pitch|playground|village_green|nature_reserve|stadium|track/.test(c)) cover.parks.push(...f.rings); }
   return { buildings, addrs, cover, counts: { buildings: buildings.length, addrs: addrs.length } };
 }
 
@@ -165,7 +171,7 @@ export async function loadOvertureScene(lat, lon, detail) {
     overtureFeatures('base', 'land_use', lat, lon, mid, 13).catch(() => []),
     overtureFeatures('base', 'land_cover', lat, lon, mid, 13).catch(() => []),
   ]);
-  const out = { addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: Date.now(), stale: false };
+  const out = { parks: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: Date.now(), stale: false };
   const byId = new Map();
   for (const f of b) {
     if (f.type !== 3 || !f.rings.length || f.props.is_underground) continue;

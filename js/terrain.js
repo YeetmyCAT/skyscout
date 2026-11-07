@@ -45,11 +45,11 @@ export async function heightField(lat, lon, radiusM, z) {
 }
 
 // Imagery mosaic as a canvas aligned to a local square (metres), for the ground texture.
-export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGERY) {
+export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGERY, maxTiles = 100) {
   const [latN, lonW] = local.toLL(-halfSize, halfSize), [latS, lonE] = local.toLL(halfSize, -halfSize);
   const x0 = Math.floor(lon2x(lonW, z)), x1 = Math.floor(lon2x(lonE, z));
   const y0 = Math.floor(lat2y(latN, z)), y1 = Math.floor(lat2y(latS, z));
-  if ((x1 - x0 + 1) * (y1 - y0 + 1) > 100) return null;
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > maxTiles) return null;
   const list = []; for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) list.push({ x, y });
   const imgs = await pool(list, 6, async t => { const b = await cachedBlob(urlFn(z, t.x, t.y), 120 * 864e5); return b ? { ...t, bmp: await createImageBitmap(b).catch(() => null) } : null; });
   const cv = document.createElement('canvas'); cv.width = cv.height = px;
