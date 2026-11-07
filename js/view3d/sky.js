@@ -46,7 +46,7 @@ export function makeSkyLUT(renderer, U) {
         return pow(vec3(10.0), vec3(e.r*7.0 - 8.0)) * uHasLP;
       }
       void main(){
-        float az = vUv.x*2.0*PI; float s = vUv.y*2.0 - 1.0; float h = sign(s)*s*s*0.5*PI;
+        float az = vUv.x*2.0*PI; float s = vUv.y*2.0 - 1.0; float h = max(sign(s)*s*s*0.5*PI, 0.004);
         vec3 rd = vec3(cos(h)*sin(az), sin(h), -cos(h)*cos(az));
         vec3 ro = vec3(0.0, Rg + uObsKm, 0.0);
         vec2 top = rs(ro, rd, Rt); vec2 gr = rs(ro, rd, Rg);

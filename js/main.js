@@ -8,7 +8,7 @@ import { nightInfo, sunMoon, phaseName } from './astro.js';
 import { scout, urbanLookup } from './scout.js';
 import { findSprites } from './sprites.js';
 import { route, roadHazards, congestion, tomtomKey, driveTable } from './routing.js';
-import { loadStructures } from './osm.js';
+import { loadStructures, loadOverture } from './osm.js';
 import { MapView } from './map.js';
 
 const S = {
@@ -68,7 +68,7 @@ function setTime(d, from) {
   if (from !== 'slider') $('#time').value = Math.round((d - S.t0) / 900e3);
   showTime();
   clearTimeout(timeTimer);
-  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) S.view.setTime(S.time); }, from === 'slider' ? 60 : 0);
+  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) { S.view.setTime(S.time); checkSpritePrompt(); } }, from === 'slider' ? 60 : 0);
   if (S.view && S.view.running && from === 'play') S.view.setTime(S.time);
 }
 
@@ -432,8 +432,10 @@ async function open3D(site) {
     const ctx = { lat, lon, name: site ? site.name : S.sel.name, time: S.time, local, groundZ: point.elevation, point, utcOffset: point.utcOffset, aq, lights, lp, domes,
       grid: series ? { series, n, half } : null, sat, sprites: site && site.sprites ? site.sprites : [] };
     await S.view.open(ctx, prog);
-    if (site && site.farStorms) { S.view.setFarStorms(site.farStorms); S.view.U.uSpriteMode.value = 1; $('#spriteSim').classList.add('on'); }
-    else S.view.setFarStorms([]);
+    if (site && site.spriteData) { S.view.setStormForecast(site.spriteData); S.view.U.uSpriteMode.value = 1; $('#spriteSim').classList.add('on'); S.spriteView = { t0: S.time.getTime() / 1000 }; }
+    else if (site && site.farStorms) { S.view.setFarStorms(site.farStorms); S.spriteView = null; }
+    else { S.view.setFarStorms([]); S.spriteView = null; }
+    $('#spritePrompt') && $('#spritePrompt').classList.add('hidden');
     if (site && site.lookAz != null) { S.view.yaw = site.lookAz; S.view.pitch = site.lookAlt || 10; }
     S.view.urban = lights ? urbanLookup(lights) : null;
     S.view3dSite = { lat, lon, lights };
@@ -489,8 +491,9 @@ function setup3DMenu() {
     const end = e => { if (e.pointerId !== id) return; id = null; knob.style.transform = ''; v.joy = null; };
     joy.addEventListener('pointerup', end); joy.addEventListener('pointercancel', end);
   }
-  $('#gyroBtn').onclick = async () => { const on = await v.enableGyro(!v.gyro); $('#gyroBtn').classList.toggle('on', on); };
+  $('#gyroBtn').onclick = async () => { const on = await v.enableGyro(!v.gyro); $('#gyroBtn').classList.toggle('on', on); $('#gyroBtn').textContent = on ? '📱 Look with phone: on' : '📱 Look with phone'; };
   $('#soundBtn').onclick = () => { if (v.audio.on) v.audio.disable(); else v.audio.enable(); $('#soundBtn').classList.toggle('on', v.audio.on); };
+  $('#spriteSim').classList.toggle('on', v.U.uSpriteMode.value > 0.5);
   $('#spriteSim').onclick = () => { const on = v.U.uSpriteMode.value < 0.5; v.U.uSpriteMode.value = on ? 1 : 0; $('#spriteSim').classList.toggle('on', on); };
   $('#quality').onchange = e => { const q = e.target.value; v.q.cloudScale = q === 'low' ? 0.25 : q === 'high' ? (v.mobile ? 0.5 : 0.75) : (v.mobile ? 0.34 : 0.5); v.U.uSteps.value = q === 'low' ? 28 : q === 'high' ? 80 : v.mobile ? 36 : 56; v.mkTargets(); };
 }
@@ -500,13 +503,14 @@ async function loadStructuresNow() {
   const detail = +$('#structDetail').value;
   st.textContent = 'Downloading OpenStreetMap buildings, trees, lamps, power lines…';
   try {
-    const osm = await loadStructures(v.ctx.lat, v.ctx.lon, detail);
+    const [osm, ov] = await Promise.all([loadStructures(v.ctx.lat, v.ctx.lon, detail), loadOverture(v.ctx.lat, v.ctx.lon, detail).catch(() => null)]);
+    osm.overture = osm.fallback ? { buildings: [], addrs: [], cover: ov ? ov.cover : { grass: [], tree: [] } } : ov;   // fallback scene already is Overture
     st.textContent = `Building 3D models for ${osm.buildings.length} buildings, ${osm.trees.length} mapped trees, ${osm.forests.length} woods…`;
     await new Promise(r => setTimeout(r, 30));
     const lat = v.ctx.lat, al = Math.abs(lat), coniferShare = al > 58 ? 0.92 : al > 50 ? 0.6 : al > 42 ? 0.35 : al < 23 ? 0 : 0.2;
     const urban = v.urban ? ((x, z) => { const [la, lo] = v.ctx.local.toLL(x, -z); return v.urban(la, lo); }) : (() => 0);
     const stats = v.setStructures(osm, { detail, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
-    st.textContent = `Loaded ${stats.buildings} buildings${stats.addrHouses ? ` (${stats.addrHouses} added at unmapped addresses)` : ''}, ${stats.trees} trees, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}`;
+    st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
   } catch (e) { st.textContent = 'Could not load map data: ' + e.message; }
   btn.disabled = false;
 }
@@ -545,7 +549,8 @@ async function runScout() {
     const depart = new Date(Math.max(Date.now(), (night.sunset || d0).getTime() - maxH * 3600e3));
     const res = await scout(home, { radiusKm, night, regional, departLocal: depart, weights: W, maxDriveH: maxH, allowOffRoad: $('#scRoad').value === 'walk' }, prog);
     res.night = night; res.home = home; res.regional = regional; res.depart = depart;
-    S.scoutRes = res; prog(`Checked ${res.sites.length} reachable sites (${$('#scRoad').value === 'walk' ? 'walk-in spots allowed' : 'all right at a road'}) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
+    S.scoutRes = res; if (!res.sites.length) { prog(`No reachable sites: ${res.candidates} candidates were all on water or more than ${$('#scRoad').value === 'walk' ? '3 km' : '2.5 km'} from a road. Try a longer drive or walk-in spots.`); listScout(); return; }
+    prog(`${res.noRouting ? '⚠ Drive times are straight-line estimates (routing unavailable). ' : ''}Checked ${res.sites.length} reachable sites (${$('#scRoad').value === 'walk' ? 'walk-in spots allowed' : 'all right at a road'}) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
     listScout();
   } catch (e) { console.error(e); prog('Scouting failed: ' + e.message); }
 }
@@ -624,6 +629,28 @@ async function runSprites() {
     S.spriteRes = res; listSprites(res, night);
   } catch (e) { console.error(e); prog('Sprite search failed: ' + e.message); }
 }
+function openSpriteSpot(r, name) {
+  setTime(new Date(r.t * 1000));
+  open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour } });
+}
+// Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
+function checkSpritePrompt() {
+  const sv = S.spriteView, res = S.spriteRes; if (!sv || !res || !res.all || !S.view || !S.view.running) return;
+  const t = S.time.getTime() / 1000;
+  if (Math.abs(t - sv.t0) < 3 * 3600) return;
+  sv.t0 = t;
+  const hourly = res.all.filter(r => Math.abs(r.t - t) <= 1800).sort((a, b) => b.score - a.score);
+  let box = $('#spritePrompt');
+  if (!box) { box = el('div', { id: 'spritePrompt', class: 'hud card' }); $('#view3d').append(box); }
+  if (!hourly.length) { box.innerHTML = `<b>Storms have moved</b><div class="small">No good sprite viewing spot is forecast for ${fmtDT(S.time, tz())}.</div><div class="row"><button class="btn" id="spOk">OK</button></div>`; }
+  else {
+    const b = hourly[0];
+    box.innerHTML = `<b>3 hours later: storms have moved</b><div class="small">Best sprite spot for ${fmtDT(S.time, tz())}: ${U.km(b.dHome)} from your start, look ${dirName(b.bearing)} at a storm ${U.km(b.dist)} away.</div><div class="row"><button class="btn primary" id="spGo2">Go there</button><button class="btn" id="spOk">Stay here</button></div>`;
+    box.querySelector('#spGo2').onclick = () => { box.classList.add('hidden'); openSpriteSpot(b, 'Sprite spot (updated)'); };
+  }
+  box.querySelector('#spOk').onclick = () => box.classList.add('hidden');
+  box.classList.remove('hidden');
+}
 function listSprites(res, night) {
   const box = $('#spList'); map.storms.clearLayers(); map.results.clearLayers();
   const z = tz();
@@ -643,7 +670,7 @@ function listSprites(res, night) {
       <div class="small">${fmtDT(t, z)} · look <b>${dirName(r.bearing)} (${Math.round(r.bearing)}°)</b> · storm ${U.km(r.dist)} away · sprites ~${r.spriteAlt.toFixed(0)}° up, anvil top ${r.anvilAlt.toFixed(1)}°</div>
       <div class="small muted">Storm system ~${Math.round(r.storm.area / 1000)}k km² · clear path ${(r.clearPath * 100).toFixed(0)}% · sky overhead ${(r.localClear * 100).toFixed(0)}% clear · moon ${r.moonPen > 0.05 ? 'up' : 'down'}</div>`;
     const act = el('div', { class: 'row' });
-    act.append(el('button', { class: 'btn', onclick: e => { e.stopPropagation(); setTime(t); open3D({ lat: r.p[0], lon: r.p[1], name: `Sprite spot #${i + 1}`, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, sprites: [{ az: r.bearing, distKm: r.dist, spriteAlt: r.spriteAlt }], farStorms: [{ az: r.bearing, distKm: r.dist, topKm: r.storm.topKm, strength: r.storm.peak, widthKm: Math.sqrt(r.storm.area) }] }); } }, '3D view toward storm'),
+    act.append(el('button', { class: 'btn', onclick: e => { e.stopPropagation(); setTime(t); openSpriteSpot(r, `Sprite spot #${i + 1}`); } }, '3D view toward storm'),
       el('a', { class: 'btn', href: `https://maps.apple.com/?daddr=${r.p[0]},${r.p[1]}&dirflg=d`, target: '_blank' }, 'Directions'));
     card.append(act);
     box.append(card);

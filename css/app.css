@@ -137,3 +137,13 @@ a.btn { color: var(--text); text-decoration: none; display: inline-block; }
 .labels3d div.hide { display: none; }
 .row select { max-width: 100%; } .row label { flex-wrap: wrap; }
 .tabs button { white-space: nowrap; font-size: 14px; }
+
+@media (max-height: 520px) and (pointer: coarse) {
+  .hud-read { top: calc(48px + var(--safe-t)); bottom: auto; left: calc(12px + env(safe-area-inset-left, 0px)); font-size: 11px; max-width: 46%; line-height: 1.35; }
+  .joy { width: 96px; height: 96px; left: calc(14px + env(safe-area-inset-left, 0px)); bottom: calc(66px + var(--safe-b)); }
+  .joy i { width: 42px; height: 42px; margin: -21px 0 0 -21px; }
+  #pick3d { bottom: calc(66px + var(--safe-b)); left: auto; right: 12px; transform: none; max-width: 50vw; }
+  #menu3d { max-height: calc(var(--appH, 100vh) - 110px); }
+  .hud-top { top: calc(6px + var(--safe-t)); }
+}
+#spritePrompt { left: 50%; transform: translateX(-50%); top: calc(60px + var(--safe-t)); max-width: min(92vw, 420px); z-index: 9; }

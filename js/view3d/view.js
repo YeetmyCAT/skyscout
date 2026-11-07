@@ -71,14 +71,19 @@ export class Immersive {
     this.final = fsPass(`in vec2 vUv; uniform sampler2D t, tB1, tB2; uniform float uScot, uDither; ${SAFE}
       vec3 tm(vec3 x){ return x*(1.0 + x/9.0)/(1.0 + x); }
       void main(){
-        vec3 c = safeC(texture(t, vUv).rgb) + safeC(texture(tB1, vUv).rgb)*0.06 + safeC(texture(tB2, vUv).rgb)*0.05;
+        vec2 o1 = 0.6/vec2(textureSize(tB1, 0)), o2 = 0.6/vec2(textureSize(tB2, 0));
+        vec3 b1 = (texture(tB1, vUv + o1*vec2(1,1)).rgb + texture(tB1, vUv + o1*vec2(-1,1)).rgb + texture(tB1, vUv + o1*vec2(1,-1)).rgb + texture(tB1, vUv - o1).rgb)*0.25;
+        vec3 b2 = (texture(tB2, vUv + o2*vec2(1,1)).rgb + texture(tB2, vUv + o2*vec2(-1,1)).rgb + texture(tB2, vUv + o2*vec2(1,-1)).rgb + texture(tB2, vUv - o2).rgb)*0.25;
+        vec3 c = safeC(texture(t, vUv).rgb) + safeC(b1)*0.06 + safeC(b2)*0.05;
         float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
         c = mix(c, vec3(L)*vec3(0.78, 0.92, 1.18), uScot);      // Purkinje shift / rod vision
         c = tm(max(c, 0.0));
         c = pow(c, vec3(1.0/2.2));
-        float n = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-        gl_FragColor = vec4(c + (n - 0.5)/255.0*uDither, 1.0);
-      }`, { t: { value: null }, tB1: { value: null }, tB2: { value: null }, uScot: { value: 0 }, uDither: { value: 1.5 } });
+        // triangular dither: two decorrelated noise values hide 8-bit steps in dark gradients
+        float n1 = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float n2 = fract(52.9829189*fract(dot(gl_FragCoord.xy + vec2(17.3, 41.7), vec2(0.00583715, 0.06711056))));
+        gl_FragColor = vec4(c + (n1 + n2 - 1.0)/255.0*uDither, 1.0);
+      }`, { t: { value: null }, tB1: { value: null }, tB2: { value: null }, uScot: { value: 0 }, uDither: { value: 2.0 } });
     this.adaptL = 1; this.ev = 0; this.cameraMode = false; this.running = false; this.clock = new THREE.Clock();
     this.bindControls();
     addEventListener('resize', () => this.resize());
@@ -146,7 +151,8 @@ export class Immersive {
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; }
     const farms = new Farms(this.U, ctx.local, this.ground, { detail: opts.detail, mobile: this.mobile }).build(osm.farms || []);
     this.farms = farms; farms.setDate(ctx.lat, this.date, this.season); this.main.add(farms.group);
-    if (this.grass) { this.grass.exclude = farms.isCrop; this.grass.center = null; }
+    if (osm.overture) this.ground.setCover(osm.overture.cover);
+    if (this.grass) { this.grass.exclude = (x, z) => farms.isCrop(x, z) || (this.structures && this.structures.onPavement(x, z, 0.6)); this.grass.center = null; }
     const s = new Structures(this.U, ctx.local, this.ground, {
       extraTrees: farms.orchardTrees,
       detail: opts.detail, mobile: this.mobile, imageryTrees: opts.imageryTrees !== false, estimateLamps: opts.estimateLamps !== false,
@@ -175,7 +181,8 @@ export class Immersive {
     this.structures.dispose(); this.structures = null; this.U.uLightMap.value = null;
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; if (this.grass) { this.grass.exclude = null; this.grass.center = null; } }
   }
-  setFarStorms(list) { this.farStorms.set(list || []); }
+  setFarStorms(list) { this.farStorms.setForecast(null); this.farStorms.set(list || []); }
+  setStormForecast(data) { this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); this.updateLabels(); }
 
   // ---------- time ----------
   setTime(date, force) {
@@ -207,6 +214,7 @@ export class Immersive {
     U.uObsKm.value = 0.0 + Math.max(0, groundZ) / 1000 * 0;
     this.applyWeather(force);
     this.applyTimeDependent();
+    if (this.farStorms.forecast) this.farStorms.atTime(this.unix);
     this.updateLabels();
   }
   applyTimeDependent() {
@@ -357,20 +365,22 @@ export class Immersive {
     addEventListener('keyup', e => this.keys.delete(e.key.toLowerCase()));
   }
   async enableGyro(on) {
+    if (!this.gyroHandler) this.gyroHandler = e => {
+      if (!this.gyro || e.beta == null) return;
+      const heading = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
+      const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+      let pitch = e.beta - 90, yaw = heading;
+      if (so === 90 || so === -90 || so === 270) { pitch = 90 - Math.abs(e.gamma); yaw = heading + (so === 90 ? 90 : -90); }
+      this.yaw = (yaw + 360) % 360; this.pitch = clamp(pitch, -89, 89);
+    };
     if (on) {
       try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) { const r = await DeviceOrientationEvent.requestPermission(); if (r !== 'granted') return false; } } catch { return false; }
-      this.gyroHandler = e => {
-        if (e.beta == null) return;
-        const heading = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
-        // device held upright in portrait: beta 90 = horizon
-        const so = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
-        let pitch = e.beta - 90, yaw = heading;
-        if (so === 90 || so === -90 || so === 270) { pitch = 90 - Math.abs(e.gamma); yaw = heading + (so === 90 ? 90 : -90); }
-        this.yaw = (yaw + 360) % 360; this.pitch = clamp(pitch, -89, 89);
-      };
-      addEventListener('deviceorientation', this.gyroHandler); this.gyro = true; return true;
+      if (!this.gyroListening) { addEventListener('deviceorientation', this.gyroHandler); this.gyroListening = true; }
+      this.gyro = true; return true;
     }
-    removeEventListener('deviceorientation', this.gyroHandler); this.gyro = false; return false;
+    this.gyro = false;
+    if (this.gyroListening) { removeEventListener('deviceorientation', this.gyroHandler); this.gyroListening = false; }
+    return false;
   }
   pick(cx, cy) {
     const r = this.el.getBoundingClientRect();
@@ -523,7 +533,8 @@ export class Immersive {
     if (this.sm.moon.alt > -1) d.push({ t: 'Moon', alt: this.sm.moon.alt + 1.2, az: this.sm.moon.az, cls: 'planet' });
     if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
     for (const dm of this.ctx.domes || []) d.push({ t: `${dm.name || 'Light dome'} glow`, alt: 3 + dm.strength * 4, az: dm.az, cls: 'dome', dome: true });
-    for (const s of this.ctx.sprites || []) d.push({ t: `⚡ Storm ${Math.round(s.distKm)} km — sprites ${s.spriteAlt.toFixed(0)}° up`, alt: s.spriteAlt, az: s.az, cls: 'storm', always: true });
+    const storms = this.farStorms.forecast ? this.farStorms.storms : (this.ctx.sprites || []);
+    for (const s of storms) d.push({ t: `⚡ Storm ${Math.round(s.distKm)} km — sprites ~${(s.spriteAlt ?? 10).toFixed(0)}° up`, alt: Math.max(2, (s.spriteAlt ?? 10) * 0.7), az: s.az, cls: 'storm', always: true });
     // Milky Way core
     const m = this.U.uEqToWorld.value.elements, ra = 266.4 * DEG, de = -28.9 * DEG, e = [Math.cos(de) * Math.cos(ra), Math.cos(de) * Math.sin(ra), Math.sin(de)];
     const x = m[0] * e[0] + m[3] * e[1] + m[6] * e[2], y = m[1] * e[0] + m[4] * e[1] + m[7] * e[2], z = m[2] * e[0] + m[5] * e[1] + m[8] * e[2];

@@ -104,7 +104,7 @@ export async function findSprites(home, opts, progress = () => { }) {
   // keep the best per site
   const seen = new Set(), best = [];
   for (const r of results) { const k = r.p.join(); if (seen.has(k)) continue; seen.add(k); best.push(r); if (best.length >= 12) break; }
-  return { best, stormsByHour, grid: G, hours };
+  return { best, all: results.slice(0, 2000), stormsByHour, grid: G, hours };
 }
 function nearestCell(G, home, P) {
   const N = G.n, half = (N - 1) / 2;

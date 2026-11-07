@@ -1,5 +1,6 @@
 // OpenStreetMap features via Overpass: buildings, trees, forests, roads, lamps, power lines, towers, turbines.
 import { cachedJSON } from './util.js';
+import { overtureFeatures } from './pmtiles.js';
 
 const MIRRORS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 
@@ -36,15 +37,26 @@ export async function loadStructures(lat, lon, detail = 1500) {
  way["aeroway"~"^(runway|apron)$"](${far});
 );
 out geom qt;`;
-  let lastErr;
-  for (const m of MIRRORS) {
-    try {
-      const r = await cachedJSON(`osm2:${lat.toFixed(3)},${lon.toFixed(3)}:${detail}`, m, 14 * 864e5,
-        { fetch: { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, timeout: 100000 });
-      return classify(r.data, r);
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error('Overpass unavailable');
+  const key = `osm2:${lat.toFixed(3)},${lon.toFixed(3)}:${detail}`;
+  const tryOverpass = async () => {
+    let lastErr;
+    for (const m of MIRRORS) {
+      try {
+        const r = await cachedJSON(key, m, 14 * 864e5, { fetch: { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, timeout: 60000 });
+        if (!r.data || !r.data.elements) throw new Error('bad reply');
+        return classify(r.data, r);
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('Overpass unavailable');
+  };
+  // OSM's query servers are often overloaded: if no answer within 25 s, build from Overture Maps instead.
+  const osm = tryOverpass();
+  const timer = new Promise(res => setTimeout(() => res('timeout'), 25000));
+  const first = await Promise.race([osm.catch(() => 'failed'), timer]);
+  if (first !== 'timeout' && first !== 'failed') return first;
+  const fb = await loadOvertureScene(lat, lon, detail);
+  fb.fallback = true;
+  return fb;
 }
 
 const num = v => { if (v == null) return null; const m = String(v).match(/[\d.]+/); return m ? parseFloat(m[0]) : null; };
@@ -106,4 +118,92 @@ export async function overpassQuery(q, key, ttl = 30 * 864e5, timeout = 90000) {
     } catch (e) { lastErr = e; }
   }
   throw lastErr || new Error('Overpass unavailable');
+}
+
+const ringArea = r => { let a = 0; for (let i = 0; i < r.length - 1; i++) a += r[i][1] * r[i + 1][0] - r[i + 1][1] * r[i][0]; return a / 2; };
+// Overture Maps extras: building footprints from all its sources (OSM, Microsoft, Google...), addresses, land cover.
+export async function loadOverture(lat, lon, detail) {
+  const [b, a, lc, lu] = await Promise.all([
+    overtureFeatures('buildings', 'building', lat, lon, detail, 14).catch(() => []),
+    overtureFeatures('addresses', 'address', lat, lon, detail, 14).catch(() => []),
+    overtureFeatures('base', 'land_cover', lat, lon, Math.max(detail * 1.3, 2000), 13).catch(() => []),
+    overtureFeatures('base', 'land_use', lat, lon, Math.max(detail * 1.3, 2000), 13).catch(() => []),
+  ]);
+  // buildings are clipped at tile edges: keep the largest piece of each id
+  const byId = new Map();
+  for (const f of b) {
+    if (f.type !== 3 || !f.rings.length) continue;
+    const pr = f.props, src = String(pr['@geometry_source'] || pr.sources || '');
+    if (/OpenStreetMap/i.test(src)) continue;            // already have these from OSM, with richer tags
+    if (pr.is_underground) continue;
+    let best = null, ba = 0;
+    for (const r of f.rings) { const ar = Math.abs(ringArea(r)); if (ar > ba) { ba = ar; best = r; } }
+    const id = pr.id || Math.random();
+    const prev = byId.get(id);
+    if (!prev || prev.a < ba) byId.set(id, { a: ba, ring: best, pr });
+  }
+  const buildings = [...byId.values()].map(({ ring, pr }) => ({
+    ring, type: pr.subtype === 'residential' ? 'house' : pr.class || pr.subtype || 'yes', h: pr.height || null, levels: pr.num_floors || null,
+    roofShape: pr.roof_shape, source: String(pr['@geometry_source'] || 'Overture'),
+  }));
+  const addrs = a.filter(f => f.type === 1).map(f => ({ p: f.rings[0][0], overture: true }));
+  const cover = { grass: [], tree: [], crop: [], urban: [] };
+  for (const f of lc) { if (f.type !== 3) continue; const k = f.props.subtype; if (k === 'grass' || k === 'shrub' || k === 'moss' || k === 'wetland') cover.grass.push(...f.rings); else if (k === 'tree' || k === 'forest' || k === 'mangrove') cover.tree.push(...f.rings); else if (k === 'crop') cover.crop.push(...f.rings); else if (k === 'urban') cover.urban.push(...f.rings); }
+  for (const f of lu) { if (f.type !== 3) continue; const c = (f.props.class || '') + ' ' + (f.props.subtype || ''); if (/bunker|parking|water_hazard/.test(c)) continue; if (/park|grass|golf|fairway|green|tee|rough|cemetery|recreation|meadow|village_green|garden|pitch|playground|lawn|common/.test(c)) cover.grass.push(...f.rings); }
+  return { buildings, addrs, cover, counts: { buildings: buildings.length, addrs: addrs.length } };
+}
+
+const ROAD_CLASS = { motorway: 'motorway', trunk: 'trunk', primary: 'primary', secondary: 'secondary', tertiary: 'tertiary', residential: 'residential', living_street: 'living_street', unclassified: 'unclassified', service: 'service', pedestrian: 'pedestrian', footway: 'footway', sidewalk: 'footway', crosswalk: 'footway', steps: 'footway', cycleway: 'cycleway', path: 'path', track: 'track', bridleway: 'bridleway', unknown: 'residential' };
+const jsonish = v => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
+export async function loadOvertureScene(lat, lon, detail) {
+  const mid = Math.max(detail * 1.6, 2400);
+  const [b, a, seg, infra, lu, lc] = await Promise.all([
+    overtureFeatures('buildings', 'building', lat, lon, detail, 14).catch(() => []),
+    overtureFeatures('addresses', 'address', lat, lon, detail, 14).catch(() => []),
+    overtureFeatures('transportation', 'segment', lat, lon, mid, 14).catch(() => []),
+    overtureFeatures('base', 'infrastructure', lat, lon, Math.max(mid, 6000), 13).catch(() => []),
+    overtureFeatures('base', 'land_use', lat, lon, mid, 13).catch(() => []),
+    overtureFeatures('base', 'land_cover', lat, lon, mid, 13).catch(() => []),
+  ]);
+  const out = { addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: Date.now(), stale: false };
+  const byId = new Map();
+  for (const f of b) {
+    if (f.type !== 3 || !f.rings.length || f.props.is_underground) continue;
+    let best = null, ba = 0; for (const r of f.rings) { const ar = Math.abs(ringArea(r)); if (ar > ba) { ba = ar; best = r; } }
+    const id = f.props.id || Math.random(), prev = byId.get(id);
+    if (!prev || prev.a < ba) byId.set(id, { a: ba, ring: best, pr: f.props });
+  }
+  for (const { ring, pr } of byId.values()) out.buildings.push({ ring, type: pr.subtype === 'residential' ? 'house' : pr.class || pr.subtype || 'yes', h: pr.height || null, levels: pr.num_floors || null, roofShape: pr.roof_shape });
+  for (const f of a) if (f.type === 1) out.addrs.push({ p: f.rings[0][0] });
+  const segIds = new Set();
+  for (const f of seg) {
+    if (f.type !== 2) continue;
+    const pr = f.props, key = pr.id + ':' + f.rings.length + ':' + (f.rings[0] && f.rings[0][0] && f.rings[0][0].join());
+    if (segIds.has(key)) continue; segIds.add(key);
+    const surf = jsonish(pr.road_surface), surface = Array.isArray(surf) ? (surf[0] && surf[0].value) : (surf || '');
+    const flags = String(pr.road_flags || '') + String(pr.rail_flags || '');
+    if (/is_tunnel|is_underground/.test(flags)) continue;
+    for (const line of f.rings) {
+      if (line.length < 2) continue;
+      if (pr.subtype === 'rail') out.rails.push({ line, kind: /tram/.test(pr.class || '') ? 'tram' : 'rail', bridge: /is_bridge/.test(flags) });
+      else if (pr.subtype === 'road') out.roads.push({ line, kind: ROAD_CLASS[pr.class] || 'residential', surface: surface || '', oneway: false, bridge: /is_bridge/.test(flags), lanes: null, width: null, lit: false, name: pr['@name'] || '' });
+    }
+  }
+  for (const f of infra) {
+    const c = f.props.class || '';
+    if (f.type === 2 && /power_line|minor_line|cable/.test(c)) for (const line of f.rings) out.powerLines.push({ line, minor: /minor/.test(c), voltage: null });
+    else if (f.type === 1 && /street_lamp/.test(c)) out.lamps.push({ p: f.rings[0][0], mapped: true });
+    else if (f.type === 1 && /communication_tower|mast|tower|chimney|water_tower/.test(c)) out.towers.push({ p: f.rings[0][0], kind: /chimney/.test(c) ? 'chimney' : /water/.test(c) ? 'water_tower' : 'mast', h: f.props.height || 60 });
+    else if (f.type === 1 && /wind_turbine|generator/.test(c)) out.turbines.push({ p: f.rings[0][0], h: 90, rotor: 100 });
+  }
+  for (const f of lu) {
+    if (f.type !== 3) continue; const c = f.props.class || '';
+    for (const ring of f.rings) {
+      if (/farmland|orchard|vineyard|meadow/.test(c)) out.farms.push({ ring, kind: c === 'meadow' ? 'meadow' : c === 'orchard' ? 'orchard' : c === 'vineyard' ? 'vineyard' : 'farmland', id: f.props.id });
+      else if (/industrial/.test(c)) out.industrial.push({ ring });
+      else if (/parking/.test(c)) { out.parking.push({ ring }); out.paved.push({ ring, kind: 'parking' }); }
+    }
+  }
+  for (const f of lc) if (f.type === 3 && /forest/.test(f.props.subtype || '')) for (const ring of f.rings) out.forests.push({ ring });
+  return out;
 }

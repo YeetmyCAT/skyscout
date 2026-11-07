@@ -1,7 +1,7 @@
 // Rain, snow, lightning (with bolts and thunder), distant storms on the horizon, and red sprites / elves above them.
 import * as THREE from '../../vendor/three.module.min.js';
 import { COMMON } from './glsl.js';
-import { curveDrop } from '../util.js';
+import { curveDrop, haversine, bearing } from '../util.js';
 
 export class Precip {
   constructor(U, mobile) {
@@ -155,89 +155,155 @@ export class Lightning {
 // Storms beyond the cloud domain (from the sprite/storm forecast): anvils on the horizon with flicker and sprites.
 export class FarStorms {
   constructor(U) {
-    this.U = U; this.group = new THREE.Group(); this.storms = []; this.sprites = [];
-    U.uSpriteMode = { value: 0 };
+    this.U = U; this.group = new THREE.Group(); this.storms = []; this.sprites = []; this.forecast = null;
+    U.uSpriteMode = { value: 1 };
     this.mat = new THREE.ShaderMaterial({
-      uniforms: { ...U, uKind: { value: 0 }, uI: { value: 1 }, uSeed: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { ...U, uKind: { value: 0 }, uI: { value: 1 }, uSeed: { value: 0 }, uGlow: { value: new THREE.Vector2() }, uDist: { value: 200000 }, uShear: { value: 0.2 } },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
       vertexShader: '#include <common>\nout vec2 vP;\n#include <logdepthbuf_pars_vertex>\nvoid main(){ vP = uv; gl_Position = projectionMatrix*viewMatrix*modelMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
       fragmentShader: COMMON + /* glsl */`
-        in vec2 vP; uniform float uKind, uI, uSeed;
+        in vec2 vP; uniform float uKind, uI, uSeed, uDist, uShear; uniform vec2 uGlow;
         #include <logdepthbuf_pars_fragment>
         void main(){
           #include <logdepthbuf_fragment>
           vec2 p = vP;
           if (uKind < 0.5){
-            // sprite cluster: bright red head 70-85 km, diffuse halo, blue-ish tendrils hanging down to ~50 km
-            float x = (p.x - 0.5)*2.0;
-            float cols = 0.0;
-            for (int i = 0; i < 7; i++){
-              float cx = (hash12(vec2(float(i), uSeed)) - 0.5)*1.4;
-              float w = 0.025 + 0.03*hash12(vec2(uSeed, float(i)));
-              float top = 0.75 + 0.15*hash12(vec2(float(i)*3.1, uSeed));
-              float col = exp(-pow((x - cx)/w, 2.0)) * smoothstep(0.15, 0.55, p.y) * smoothstep(top + 0.08, top - 0.05, p.y);
-              float tendr = exp(-pow((x - cx + 0.05*sin(p.y*40.0 + float(i)))/(w*0.35), 2.0)) * smoothstep(0.0, 0.5, p.y) * (1.0 - smoothstep(0.3, 0.55, p.y));
-              cols += col + tendr*0.5;
+            // sprite cluster: red crowns at 70-85 km with a diffuse halo, blue-purple tendrils reaching down to ~50 km
+            float x = (p.x - 0.5)*2.0, cols = 0.0;
+            for (int i = 0; i < 9; i++){
+              float cx = (hash12(vec2(float(i), uSeed)) - 0.5)*1.5;
+              float w = 0.02 + 0.03*hash12(vec2(uSeed, float(i)));
+              float top = 0.72 + 0.18*hash12(vec2(float(i)*3.1, uSeed));
+              float carrot = exp(-pow((x - cx)/(w*(0.6 + 1.6*smoothstep(0.35, top, p.y))), 2.0)) * smoothstep(0.3, 0.6, p.y) * smoothstep(top + 0.06, top - 0.04, p.y);
+              float tendr = exp(-pow((x - cx + 0.04*sin(p.y*50.0 + float(i)*2.0))/(w*0.3), 2.0)) * smoothstep(0.02, 0.45, p.y) * (1.0 - smoothstep(0.35, 0.6, p.y));
+              cols += carrot + tendr*0.6;
             }
-            float halo = exp(-pow(x/0.7, 2.0) - pow((p.y - 0.88)/0.06, 2.0));
-            vec3 c = vec3(1.0, 0.12, 0.18)*cols + vec3(1.0, 0.25, 0.3)*halo*0.6;
-            c = mix(c, vec3(0.4, 0.3, 1.0)*cols, smoothstep(0.45, 0.2, p.y)*0.6);
-            gl_FragColor = vec4(c * uI * 0.02 * uExposure, 1.0);
+            float halo = exp(-pow(x/0.8, 2.0) - pow((p.y - 0.9)/0.05, 2.0));
+            vec3 c = vec3(1.0, 0.1, 0.16)*cols + vec3(1.0, 0.3, 0.32)*halo*0.7;
+            c = mix(c, vec3(0.45, 0.3, 1.0)*cols, smoothstep(0.5, 0.2, p.y)*0.6);
+            gl_FragColor = vec4(min(c * uI * 0.08 * uExposure, vec3(3.0e4)), 1.0);
+          } else if (uKind < 1.5){
+            // elve: a fast expanding red ring at ~90 km
+            vec2 q = (p - 0.5)*2.0; q.y *= 6.0;
+            float r = length(q), ring = exp(-pow((r - 0.6)/0.18, 2.0));
+            gl_FragColor = vec4(vec3(1.0, 0.15, 0.1) * ring * uI * 0.01 * uExposure, 1.0);
           } else {
-            // distant thunderstorm: towers rising into a flat anvil, a dark silhouette against the sky,
-            // lit from inside by lightning
+            // distant thunderstorm complex: towers (turrets) feeding a flat anvil sheared downwind; dark against the
+            // sky, lit by sun or moon, and from inside by lightning
             float x = (p.x - 0.5)*2.0, y = p.y;
-            float n1 = fbm2(vec2(x*6.0, y*5.0) + uSeed), n2 = fbm2(vec2(x*18.0, y*14.0) + uSeed*1.7);
-            float towers = smoothstep(0.55 + 0.25*sin(x*7.0 + uSeed)*(1.0 - y), 0.2, abs(x)*1.6 + (y - 0.1)*0.4) * step(y, 0.84);
-            float anvilW = 0.35 + 0.65*smoothstep(0.6, 0.86, y);
-            float anvil = smoothstep(0.78, 0.84, y) * smoothstep(0.95, 0.88, y + n1*0.04) * smoothstep(anvilW, anvilW - 0.15, abs(x - 0.25*smoothstep(0.75, 0.9, y)));
-            float d = clamp(max(towers, anvil) * (0.75 + 0.5*n2), 0.0, 1.0);
-            d *= smoothstep(0.0, 0.04, y);
-            if (d < 0.02) discard;
-            vec3 sil = skyL(vec3(0.0, 0.03, -1.0)) * 0.45;
-            float glow = exp(-pow((x - 0.1*sin(uSeed*7.0))*2.5, 2.0) - pow((y - 0.45)*2.2, 2.0));
-            vec3 flash = vec3(0.8, 0.82, 1.0) * uI * (0.25 + glow) * 0.06 * uExposure;
-            gl_FragColor = vec4(sil + flash*d, d*0.9);
+            vec2 wq = vec2(x*3.0, y*4.0) + uSeed;
+            vec2 warp = vec2(fbm2(wq), fbm2(wq + 5.2)) - 0.5;
+            float n1 = fbm2(vec2(x*7.0, y*6.0) + warp*1.5 + uSeed), n2 = fbm2(vec2(x*22.0, y*18.0) + warp*3.0);
+            float turrets = 0.0;
+            for (int i = 0; i < 5; i++){
+              float cx = (hash12(vec2(float(i), uSeed)) - 0.5)*1.2, w = 0.08 + 0.1*hash12(vec2(uSeed, float(i) + 3.0));
+              float top = 0.55 + 0.35*hash12(vec2(float(i)*7.0, uSeed));
+              turrets = max(turrets, smoothstep(w*1.6, w*0.4, abs(x - cx - warp.x*0.08)) * smoothstep(top + 0.05, top - 0.15, y + (n1 - 0.5)*0.12));
+            }
+            float anvilW = 0.4 + 0.6*smoothstep(0.62, 0.86, y);
+            float ax = x - uShear*smoothstep(0.7, 0.9, y);
+            float anvil = smoothstep(0.76, 0.82, y + (n1 - 0.5)*0.05) * smoothstep(0.95, 0.88, y + (n1 - 0.5)*0.04) * smoothstep(anvilW, anvilW - 0.25, abs(ax));
+            float base = smoothstep(0.0, 0.05, y) * smoothstep(0.75, 0.2, abs(x)) * step(y, 0.3);
+            float d = clamp(max(max(turrets, anvil), base*0.8) * (0.7 + 0.6*n2), 0.0, 1.0);
+            if (d < 0.03) discard;
+            // daylight / moonlight on the cloud, then the long air path in front of it
+            vec3 lit = (uSunE*directT(max(uSunDir.y, 0.02))*smoothstep(-0.05, 0.05, uSunDir.y) + uMoonE*directT(max(uMoonDir.y, 0.02))*smoothstep(-0.05, 0.05, uMoonDir.y)) * uExposure * 0.5/PI * (0.6 + 0.6*y)
+                     + skyL(vec3(0.0, 1.0, 0.0)) * 0.6;
+            vec3 hz = hazeL(vec3(0.0, 0.03, -1.0));
+            vec3 col = mix(lit, hz, 1.0 - exp(-uDist * 3.912 / max(uVisKm*1000.0*6.0, 60000.0)));
+            float glow = exp(-pow((x - uGlow.x)*3.0, 2.0) - pow((y - uGlow.y)*3.0, 2.0));
+            col += vec3(0.82, 0.84, 1.0) * uI * (0.15 + glow) * 0.08 * uExposure * (0.5 + n2);
+            gl_FragColor = vec4(min(col, vec3(3.0e4)), d*0.95);
           }
         }`,
     });
   }
-  // storms: [{az, distKm, topKm, strength}]
+  // Forecast storm complexes by hour (from the sprite finder): they move and grow/decay with time.
+  setForecast(data, lat, lon) { this.forecast = data ? { ...data, lat, lon } : null; }
+  atTime(unix) {
+    const F = this.forecast; if (!F || !F.stormsByHour || !F.stormsByHour.length) { this.set([]); return; }
+    const H = F.stormsByHour;
+    let i = 0; while (i < H.length - 2 && H[i + 1].t <= unix) i++;
+    const a = H[i], b = H[Math.min(i + 1, H.length - 1)];
+    if (unix < a.t - 1800 || unix > b.t + 1800) { this.set([]); return; }
+    const f = b.t > a.t ? Math.max(0, Math.min(1, (unix - a.t) / (b.t - a.t))) : 0;
+    const used = new Set(), out = [];
+    const dist = (p, q) => haversine(p.la, p.lo, q.la, q.lo) / 1000;
+    for (const [k, c] of a.clusters.entries()) {
+      let best = -1, bd = 250;
+      b.clusters.forEach((d, j) => { const x = dist(c, d); if (x < bd && !used.has(j)) { bd = x; best = j; } });
+      if (best >= 0) { used.add(best); const d = b.clusters[best]; out.push({ id: `${i}:${k}`, la: c.la + (d.la - c.la) * f, lo: c.lo + (d.lo - c.lo) * f, area: c.area + (d.area - c.area) * f, peak: c.peak + (d.peak - c.peak) * f, topKm: c.topKm + (d.topKm - c.topKm) * f }); }
+      else out.push({ id: `${i}:${k}`, ...c, peak: c.peak * (1 - f) });           // dying
+    }
+    b.clusters.forEach((d, j) => { if (!used.has(j)) out.push({ id: `n${i}:${j}`, ...d, peak: d.peak * f }); });   // forming
+    const list = [];
+    for (const c of out) {
+      const dKm = haversine(F.lat, F.lon, c.la, c.lo) / 1000;
+      // the near edge of the complex sets the geometry; too close (overhead) or beyond ~650 km: no sprite view
+      const edge = Math.max(10, dKm - Math.sqrt(c.area) / 2);
+      if (edge < 80 || edge > 650 || c.peak < 0.08) continue;
+      const az = bearing(F.lat, F.lon, c.la, c.lo);
+      const drop = curveDrop(edge * 1000) / 1000;
+      list.push({ id: c.id, az, distKm: edge, topKm: c.topKm, strength: c.peak, widthKm: Math.min(400, Math.sqrt(c.area) * 1.1), area: c.area, spriteAlt: Math.atan((75 - drop) / edge) * 180 / Math.PI });
+    }
+    this.set(list);
+  }
+  // storms: [{id, az, distKm, topKm, strength, widthKm}]
   set(storms) {
-    for (const o of this.group.children.slice()) this.group.remove(o);
+    const keep = new Map(this.storms.map(s => [s.id, s]));
+    for (const o of this.group.children.slice()) if (!this.sprites.some(sp => sp.mesh === o)) this.group.remove(o);
     this.storms = storms.map((s, i) => {
       const d = s.distKm * 1000, az = s.az * Math.PI / 180, x = Math.sin(az) * d, z = -Math.cos(az) * d;
       const drop = curveDrop(d);
-      const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0), this.mat.clone());
-      m.material.uniforms.uKind.value = 1; m.material.uniforms.uSeed.value = i * 3.7; m.material.blending = THREE.NormalBlending;
-      m.position.set(x, -drop, z); m.scale.set(s.widthKm * 1000 || 60000, s.topKm * 1000 * 1.1, 1); m.lookAt(0, -drop, 0);
-      m.frustumCulled = false; m.material.uniforms.uI.value = 0;
+      const old = keep.get(s.id);
+      const m = old ? old.mesh : new THREE.Mesh(new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0), this.mat.clone());
+      const u = m.material.uniforms;
+      u.uKind.value = 2; u.uSeed.value = (typeof s.id === 'string' ? s.id.length * 3.1 : 0) + i * 3.7; u.uDist.value = d; u.uShear.value = 0.25;
+      m.material.blending = THREE.NormalBlending;
+      m.position.set(x, -drop, z); m.scale.set((s.widthKm || 60) * 1000, s.topKm * 1000 * 1.1, 1); m.lookAt(0, -drop, 0);
+      m.frustumCulled = false; if (!old) u.uI.value = 0;
       this.group.add(m);
-      return { ...s, x, z, drop, mesh: m, next: 0 };
+      return { ...s, x, z, drop, mesh: m, next: old ? old.next : 0, nextSprite: old ? old.nextSprite : 0, flashT: old && old.flashT };
     });
   }
   update(now, spriteMode, night) {
     for (const s of this.storms) {
-      // internal flicker: several flashes per second for a strong MCS
-      if (now > s.next) { s.next = now + (-Math.log(Math.random())) / (0.5 + s.strength * 3); s.flashT = now; s.flashI = 0.2 + Math.random(); }
+      // internal flicker: a big system flashes every second or so
+      if (now > s.next) { s.next = now + (-Math.log(Math.random())) / (0.4 + s.strength * 2.5); s.flashT = now; s.flashI = 0.2 + Math.random(); s.mesh.material.uniforms.uGlow.value.set((Math.random() - 0.5) * 1.2, 0.25 + Math.random() * 0.5); }
       const f = s.flashT ? Math.exp(-(now - s.flashT) / 0.06) * s.flashI : 0;
       s.mesh.material.uniforms.uI.value = f * s.strength;
-      // sprites: rare, after strong +CG strokes in large systems
-      if (spriteMode && night && s.strength > 0.3 && f > 0.9 && Math.random() < 0.08 * s.strength) this.spawnSprite(s, now);
+      // sprites: large systems produce one every few seconds to a minute (shown a little more often than real)
+      if (spriteMode && night && s.strength > 0.15) {
+        if (!s.nextSprite) s.nextSprite = now + 1 + Math.random() * 3;
+        if (now > s.nextSprite) {
+          const rate = 0.15 * s.strength * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
+          s.nextSprite = now + (-Math.log(Math.random())) / rate;
+          s.flashT = now; s.flashI = 1.6;                      // the parent +CG stroke lights the cloud
+          this.spawnSprite(s, now);
+        }
+      }
     }
     this.sprites = this.sprites.filter(sp => {
-      const t = now - sp.t0; const I = t < 0.01 ? t / 0.01 : Math.exp(-(t - 0.01) / 0.07);
+      const t = now - sp.t0; const I = t < 0.012 ? t / 0.012 : Math.exp(-(t - 0.012) / sp.decay);
       sp.mesh.material.uniforms.uI.value = I * sp.I;
-      if (t > 0.6) { this.group.remove(sp.mesh); return false; }
+      if (t > sp.decay * 8) { this.group.remove(sp.mesh); return false; }
       return true;
     });
   }
   spawnSprite(s, now) {
+    // over the trailing stratiform part of the complex, 50-90 km up
+    const az = s.az * Math.PI / 180, side = (Math.random() - 0.5) * (s.widthKm || 80) * 1000 * 0.8, along = (Math.random() - 0.3) * 40000;
+    const d = s.distKm * 1000 + along, drop = curveDrop(d);
+    const bx = Math.sin(az) * d + Math.cos(az) * side, bz = -Math.cos(az) * d + Math.sin(az) * side;
     const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0), this.mat.clone());
     m.material.uniforms.uKind.value = 0; m.material.uniforms.uSeed.value = Math.random() * 100;
-    const off = (Math.random() - 0.5) * 60000;
-    m.position.set(s.x + Math.cos(s.az * Math.PI / 180) * off, 45000 - s.drop, s.z + Math.sin(s.az * Math.PI / 180) * off);
-    m.scale.set(30000 + Math.random() * 30000, 45000, 1); m.lookAt(0, m.position.y, 0); m.frustumCulled = false;
-    this.group.add(m); this.sprites.push({ mesh: m, t0: now, I: 2 + Math.random() * 3 });
+    m.position.set(bx, 45000 - drop, bz); m.scale.set(20000 + Math.random() * 40000, 45000, 1); m.lookAt(0, m.position.y, 0); m.frustumCulled = false;
+    this.group.add(m); this.sprites.push({ mesh: m, t0: now, I: 3 + Math.random() * 4, decay: 0.05 + Math.random() * 0.08 });
+    if (Math.random() < 0.2) {   // an elve sometimes precedes the sprite
+      const e = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0), this.mat.clone());
+      e.material.uniforms.uKind.value = 1; e.position.set(bx, 80000 - drop, bz); e.scale.set(300000, 30000, 1); e.lookAt(0, e.position.y, 0); e.frustumCulled = false;
+      this.group.add(e); this.sprites.push({ mesh: e, t0: now, I: 2, decay: 0.02 });
+    }
   }
 }
 

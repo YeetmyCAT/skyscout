@@ -80,11 +80,16 @@ export async function scout(home, opts, progress = () => { }) {
   // so no destination ends up in a lake or a field with no access.
   progress('Getting driving times and snapping sites to roads…');
   const dt = await driveTable(home, res.map(r => r.p));
+  const noRouting = dt.every(x => !x);
+  if (noRouting) progress('Routing services are not answering; using straight-line drive estimates…');
   const cong = congestion(departLocal || new Date());
   const maxH = opts.maxDriveH || radiusKm / 70;
   const urbanHome = clamp(Math.log10(1 + (regional ? quickLP(regional, home[0], home[1]).zen * QUICK.zen / NAT_SKY : 1)) / 1.5, 0, 0.8);
   let all = res.map((r, i) => {
-    const d = dt[i]; if (!d || !d.snap) return null;
+    let d = dt[i];
+    if (!d && noRouting) d = { dur: r.dist * 1.35 / 70 * 3600, dist: r.dist * 1350, snap: null, snapDist: 0, est: true };   // straight-line estimate
+    if (!d) return null;
+    if (!d.snap) { r.driveEstimated = !!d.est; d.snap = r.p; }
     if (opts.allowOffRoad) {
       // keep the dark spot itself; drive to the nearest road point and walk the rest (up to 3 km)
       if (d.snapDist > 3000) return null;
@@ -141,7 +146,7 @@ export async function scout(home, opts, progress = () => { }) {
     } catch { }
   }
   all.sort((a, b) => b.score - a.score);
-  return { sites: all, hours, moonW, others: [] };
+  return { sites: all, hours, moonW, others: [], noRouting, candidates: res.length };
 }
 
 // 0..1 urban-ness from night-light radiance, on a 0.05 degree lookup grid.

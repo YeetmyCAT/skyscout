@@ -299,8 +299,15 @@ export class Structures {
     this.buildWater(osm.water || [], osm.rivers || []);
     this.paved = [];
     this.buildRoads(osm);
-    this.addrHouses = this.housesFromAddresses(osm.addrs || [], osm.buildings);
-    this.buildBuildings(osm.buildings.concat(this.addrHouses));
+    // One building per spot: OSM first, then other sources' footprints where OSM has none, then a generic house
+    // at any remaining address.
+    const extra = this.extraBuildings(osm.buildings, (osm.overture && osm.overture.buildings) || []);
+    this.extraCount = extra.length;
+    const allB = osm.buildings.concat(extra);
+    const addrs = (osm.addrs || []).concat((osm.overture && osm.overture.addrs) || []);
+    this.addrHouses = this.housesFromAddresses(addrs, allB);
+    this.buildBuildings(allB.concat(this.addrHouses));
+    this.segGrid = null;   // rebuild the pavement index with buildings included
     this.buildTrees(osm);
     this.buildLamps(osm);
     this.buildPower(osm.powerLines);
@@ -309,9 +316,10 @@ export class Structures {
     this.buildAreas(osm);
     this.ground.setLights(this.lamps, this.areas);
     this.buildColliderGrid();
+    this.segGrid = null;
     const pts = this.lamps.filter(l => l.glow !== false).map(l => ({ x: l.x, y: l.y, z: l.z, cd: l.cd, c: l.cc || [1, 0.75, 0.45], blink: l.blink }));
     this.glow = lightPoints(this.U, pts); this.group.add(this.glow);
-    this.stats = { addrHouses: this.addrHouses.length, buildings: osm.buildings.length + this.addrHouses.length, trees: this.treeCount, lamps: this.lamps.length, ms: Math.round(performance.now() - t0) };
+    this.stats = { addrHouses: this.addrHouses.length, extraBuildings: this.extraCount, buildings: osm.buildings.length + this.extraCount + this.addrHouses.length, trees: this.treeCount, lamps: this.lamps.length, ms: Math.round(performance.now() - t0) };
     return this;
   }
   h(x, z) { return this.ground.heightAt(x, z); }
@@ -351,7 +359,7 @@ export class Structures {
       const [x0, y0] = this.local.toXY(a.p[0], a.p[1]); let x = x0, z = -y0;
       if (Math.abs(x) > half || Math.abs(z) > half) continue;
       if (nearBuilding(x, z, 2)) continue;                              // the address belongs to a mapped building
-      if (placed.some(q => Math.hypot(q[0] - x, q[1] - z) < 12)) continue;   // several addresses in one building
+      if (placed.some(q => Math.hypot(q[0] - x, q[1] - z) < 14)) continue;   // same address from several sources, or several in one building
       // nearest road decides which way the house faces
       let best = null, bd = 70;
       for (const r of this.roadLines || []) for (let i = 0; i < r.d.length - 1; i++) {
@@ -380,17 +388,42 @@ export class Structures {
     }
     return out;
   }
+  // Footprints from other sources, skipping any that overlap an OSM building.
+  extraBuildings(osmB, extra) {
+    const grid = new Map(), C = 40, key = (i, j) => i + ',' + j;
+    for (const b of osmB) {
+      const p = ringLocal(this.local, b.ring); if (p.length < 3) continue;
+      const xs = p.map(q => q[0]), zs = p.map(q => q[1]), o = { p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+      for (let i = Math.floor(o.x0 / C); i <= Math.floor(o.x1 / C); i++) for (let j = Math.floor(o.z0 / C); j <= Math.floor(o.z1 / C); j++) { const k = key(i, j); let a = grid.get(k); if (!a) grid.set(k, a = []); a.push(o); }
+    }
+    const out = [];
+    for (const b of extra) {
+      const p = ringLocal(this.local, b.ring); if (p.length < 3) continue;
+      let cx = 0, cz = 0; p.forEach(q => { cx += q[0]; cz += q[1]; }); cx /= p.length; cz /= p.length;
+      const cell = grid.get(key(Math.floor(cx / C), Math.floor(cz / C))) || [];
+      if (cell.some(o => cx > o.x0 - 1 && cx < o.x1 + 1 && cz > o.z0 - 1 && cz < o.z1 + 1 && (pointInPoly(cx, cz, o.p) || p.some(q => pointInPoly(q[0], q[1], o.p))))) continue;
+      out.push(b);
+    }
+    return out;
+  }
   // Within r metres of a road, path, rail or paved area?
   onPavement(x, z, r = 0) {
-    for (const l of this.roadLines || []) {
-      for (let i = 0; i < l.d.length - 1; i += 1) {
-        const A = l.d[i]; if (Math.abs(A[0] - x) > 40 || Math.abs(A[1] - z) > 40) continue;
-        const B = l.d[i + 1], dx = B[0] - A[0], dz = B[1] - A[1], l2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((x - A[0]) * dx + (z - A[1]) * dz) / l2));
-        if (Math.hypot(x - A[0] - t * dx, z - A[1] - t * dz) < l.hw + r) return true;
+    if (!this.segGrid) this.buildPaveGrid();
+    const C = 30;
+    for (let i = Math.floor((x - r) / C) - 1; i <= Math.floor((x + r) / C) + 1; i++) for (let j = Math.floor((z - r) / C) - 1; j <= Math.floor((z + r) / C) + 1; j++) {
+      for (const sg of this.segGrid.get(i + ',' + j) || []) {
+        if (sg.p) { if (pointInPoly(x, z, sg.p)) return true; continue; }
+        const A = sg.a, B = sg.b, dx = B[0] - A[0], dz = B[1] - A[1], l2 = dx * dx + dz * dz || 1, t = Math.max(0, Math.min(1, ((x - A[0]) * dx + (z - A[1]) * dz) / l2));
+        if (Math.hypot(x - A[0] - t * dx, z - A[1] - t * dz) < sg.hw + r) return true;
       }
     }
-    for (const p of this.paved || []) if (Math.abs(p[0][0] - x) < 300 && Math.abs(p[0][1] - z) < 300 && pointInPoly(x, z, p)) return true;
     return false;
+  }
+  buildPaveGrid() {
+    const G = this.segGrid = new Map(), C = 30, add = (o, x0, x1, z0, z1) => { for (let i = Math.floor(x0 / C); i <= Math.floor(x1 / C); i++) for (let j = Math.floor(z0 / C); j <= Math.floor(z1 / C); j++) { const k = i + ',' + j; let a = G.get(k); if (!a) G.set(k, a = []); a.push(o); } };
+    for (const l of this.roadLines || []) for (let i = 0; i < l.d.length - 1; i++) { const a = l.d[i], b = l.d[i + 1]; add({ a, b, hw: l.hw }, Math.min(a[0], b[0]) - l.hw, Math.max(a[0], b[0]) + l.hw, Math.min(a[1], b[1]) - l.hw, Math.max(a[1], b[1]) + l.hw); }
+    for (const p of this.paved || []) { const xs = p.map(q => q[0]), zs = p.map(q => q[1]); if (Math.max(...xs) - Math.min(...xs) < 3000) add({ p }, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs)); }
+    for (const b of this.col.polys) add({ p: b.p }, b.x0, b.x1, b.z0, b.z1);   // building footprints count as "not grass"
   }
   buildBuildings(list) {
     const pos = [], nor = [], uv = [], info = [];
@@ -507,6 +540,9 @@ export class Structures {
       for (let x = -r; x < r; x += sp) for (let z = -r; z < r; z += sp) {
         if (trees.length > max) break;
         const jx = x + (hash(seed++) - 0.5) * sp, jz = z + (hash(seed++) - 0.5) * sp;
+        const tm = this.ground.maskAt(this.ground.treeMask, jx, jz);
+        if (tm === true) { if (hash(seed++) < 0.55 && !this.ground.isWater(jx, jz) && !this.onPavement(jx, jz, 1.5) && !(this.buildingPolys && this.buildingPolys.some(bp => bp.length > 2 && Math.abs(bp[0][0] - jx) < 40 && Math.abs(bp[0][1] - jz) < 40 && pointInPoly(jx, jz, bp)))) trees.push({ x: jx, z: jz, kind: -1, est: true }); continue; }
+        if (tm === false && this.ground.treeMask) continue;          // land cover says no trees here
         const [R, G, B] = this.ground.imageryAt(jx, jz);
         const lum = 0.3 * R + 0.59 * G + 0.11 * B, green = G - Math.max(R, B);
         const treeLike = (lum < 70 && green > 2) || (lum < 55 && Math.abs(R - G) < 12 && B < G); // canopy or bare canopy shadow
@@ -791,7 +827,31 @@ export class Structures {
     }
     if (wire.length) {
       const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(wire, 3));
-      const ls = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x1a1a1a, transparent: true, opacity: 0.85 }));
+      const wm = new THREE.ShaderMaterial({
+        uniforms: this.U, transparent: true, depthWrite: false,
+        vertexShader: '#include <common>\n' + COMMON + `
+          out vec3 vW; out float vA; uniform float uPxSr;
+          #include <logdepthbuf_pars_vertex>
+          void main(){
+            vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz;
+            vec4 mv = viewMatrix * w; float d = max(-mv.z, 1.0);
+            // a 3 cm conductor covers only a fraction of a pixel when far away: fade it by its true width
+            vA = clamp(0.03 / (d * sqrt(uPxSr)), 0.0, 0.9);
+            gl_Position = projectionMatrix * mv;
+            #include <logdepthbuf_vertex>
+          }`,
+        fragmentShader: COMMON + `
+          in vec3 vW; in float vA;
+          #include <logdepthbuf_pars_fragment>
+          void main(){
+            #include <logdepthbuf_fragment>
+            vec3 base = vec3(0.09) * (skyL(vec3(0.0, 1.0, 0.0))*PI*0.5 + (uSunE*max(uSunDir.y, 0.0)*directT(uSunDir.y))*uExposure*0.3/PI);
+            float d = length(vW - cameraPosition);
+            vec3 col = aerial(base, normalize(vW - cameraPosition), d);
+            gl_FragColor = vec4(col, vA * exp(-d * 3.912 / max(uVisKm*1000.0, 500.0)));
+          }`,
+      });
+      const ls = new THREE.LineSegments(g, wm);
       ls.frustumCulled = false; this.group.add(ls); this.wires = ls;
     }
     const place = (list, geo, color) => {

@@ -114,6 +114,23 @@ export class Ground {
     if (cn) { const g = cn.getContext('2d', { willReadFrequently: true }); this.nearPx = g.getImageData(0, 0, cn.width, cn.height); }
     return this;
   }
+  // Land cover masks (from Overture / ESA WorldCover and park land use): where grass and trees really are.
+  setCover(cover) {
+    const half = this.nearHalf, S = 1024, mk = rings => {
+      if (!rings || !rings.length) return null;
+      const cv = document.createElement('canvas'); cv.width = cv.height = S;
+      const g = cv.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, S, S); g.fillStyle = '#fff'; g.beginPath();
+      for (const r of rings) r.forEach(([la, lo], i) => { const [x, y] = this.local.toXY(la, lo), px = (x + half) / (2 * half) * S, py = (-y + half) / (2 * half) * S; i ? g.lineTo(px, py) : g.moveTo(px, py); });
+      g.fill('evenodd');
+      return g.getImageData(0, 0, S, S);
+    };
+    this.grassMask = mk(cover.grass); this.treeMask = mk(cover.tree);
+  }
+  maskAt(M, x, z) {
+    if (!M || Math.abs(x) > this.nearHalf || Math.abs(z) > this.nearHalf) return null;
+    const i = Math.floor((x + this.nearHalf) / (2 * this.nearHalf) * M.width), j = Math.floor((z + this.nearHalf) / (2 * this.nearHalf) * M.height);
+    return M.data[(Math.min(M.height - 1, j) * M.width + Math.min(M.width - 1, i)) * 4] > 128;
+  }
   // Is (x, z) open water? Aerial photo colour (dark, blue-leaning) on dead-flat terrain, or inside mapped OSM water.
   isWater(x, z) {
     if (this.waterGrid) {
@@ -226,7 +243,11 @@ export class Grass {
       const im = this.ground.imageryAt(x, z);
       const sat = Math.max(...im) - Math.min(...im), green = im[1] - Math.max(im[0], im[2]);
       const pave = sat < 14 && im[0] > 95; const water = im[2] > im[1] + 8 && im[2] > im[0] + 10;
-      if (pave || water || hash(i * 3 + 9) > 0.35 + green / 25) continue;
+      if (pave || water) continue;
+      const gm = this.ground.maskAt(this.ground.grassMask, x, z);
+      if (gm === false && (green < 8 || sat < 25)) continue;        // outside mapped grass: only clearly green lawns
+      if (gm === null && (green < 3 || sat < 18)) continue;          // no land-cover data: only clearly green ground
+      if (hash(i * 3 + 9) > 0.45 + green / 25) continue;
       if (this.exclude && this.exclude(x, z)) continue;
       if (this.ground.isWater(x, z)) continue;
       const y = this.ground.heightAt(x, z);
