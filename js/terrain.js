@@ -5,6 +5,31 @@ const TERRARIUM = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/te
 // Esri's dark-gray canvas basemap paints all water one flat dark colour: a clean water mask.
 export const WATERBASE = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`;
 export const isWaterPixel = (r, g, b) => r < 56 && g < 56 && b < 62 && b >= r;
+// Esri's light-gray canvas draws every road in pure white on grey land: a clean road map without labels.
+export const ROADBASE = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/${z}/${y}/${x}`;
+// Road masks near to far (~12 m, ~24 m, ~60 m per pixel), so distant lights go only on real streets.
+export async function roadMasks(local) {
+  const specs = [[12000, 13, 2048], [25000, 12, 2048], [46000, 11, 1536]];
+  const res = await Promise.all(specs.map(([half, z, px]) => imageryCanvas(local, half, z, px, ROADBASE, 144).catch(() => null)));
+  const out = [];
+  res.forEach((cv, k) => {
+    if (!cv) return;
+    const [half, , px] = specs[k], d = cv.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, px, px).data, m = new Uint8Array(px * px);
+    for (let i = 0; i < m.length; i++) m[i] = Math.min(d[i * 4], d[i * 4 + 1], d[i * 4 + 2]) >= 244 ? 1 : 0;
+    out.push({ half, px, m });
+  });
+  if (!out.length) return null;
+  return {
+    // true on a road, false off-road, null outside the masks
+    onRoad(x, z) {
+      for (const M of out) if (Math.abs(x) < M.half && Math.abs(z) < M.half) {
+        const i = Math.floor((x + M.half) / (2 * M.half) * M.px), j = Math.floor((z + M.half) / (2 * M.half) * M.px);
+        return M.m[j * M.px + i] === 1;
+      }
+      return null;
+    },
+  };
+}
 // Mask canvas: white where water, black on land.
 export async function waterMaskCanvas(local, halfSize, z, px = 1024) {
   const c = await imageryCanvas(local, halfSize, z, px, WATERBASE).catch(() => null);

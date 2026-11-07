@@ -122,7 +122,7 @@ export const RateLimit = {
   waitMs() { return Math.max(0, this.until - Date.now()); },
 };
 RateLimit.load();
-const isOpenMeteo = url => /open-meteo[.]com/.test(url);
+const isOpenMeteo = url => /\/\/(api|air-quality-api|ensemble-api)[.]open-meteo[.]com/.test(url);   // the forecast quota (place search is separate)
 
 // JSON with cache: fresh copy within ttl, else network, else stale copy (offline mode).
 export async function cachedJSON(key, url, ttlMs, opts = {}) {

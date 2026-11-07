@@ -144,11 +144,19 @@ async function suggest(force) {
   if (q.length < 2) { box.classList.add('hidden'); return; }
   const m = q.match(/^\s*(-?\d+(\.\d+)?)\s*[, ]\s*(-?\d+(\.\d+)?)\s*$/);
   if (m) { const d = el('div', { onclick: () => { box.classList.add('hidden'); map.map.setView([+m[1], +m[3]], 10); selectLocation(+m[1], +m[3]); } }, `Go to ${m[1]}, ${m[3]}`); box.append(d); box.classList.remove('hidden'); return; }
+  // Open-Meteo's place search, with Photon (OpenStreetMap) as a backup when it fails or finds nothing
+  let list = [];
   try {
-    const r = await cachedJSON('geo:' + q.toLowerCase(), `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=6&language=en`, 30 * 864e5);
-    for (const g of r.data.results || []) box.append(el('div', { onclick: () => { box.classList.add('hidden'); $('#q').value = g.name; map.map.setView([g.latitude, g.longitude], 10); selectLocation(g.latitude, g.longitude, `${g.name}${g.admin1 ? ', ' + g.admin1 : ''}`); } }, `${g.name}${g.admin1 ? ', ' + g.admin1 : ''}${g.country ? ', ' + g.country : ''}`));
-    box.classList.toggle('hidden', !box.children.length);
-  } catch { box.classList.add('hidden'); }
+    const r = await cachedJSON('geo:' + q.toLowerCase(), `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=en`, 30 * 864e5, { quiet: true });
+    list = (r.data.results || []).map(g => ({ name: g.name, lat: g.latitude, lon: g.longitude, region: g.admin1, country: g.country }));
+  } catch { }
+  if (!list.length) try {
+    const r = await cachedJSON('photon:' + q.toLowerCase(), `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`, 30 * 864e5, { quiet: true });
+    list = (r.data.features || []).map(f => ({ name: f.properties.name || q, lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0], region: f.properties.state || f.properties.county, country: f.properties.country }));
+  } catch { }
+  if (q !== $('#q').value.trim()) return;   // the user kept typing
+  for (const g of list) box.append(el('div', { onclick: () => { box.classList.add('hidden'); $('#q').value = g.name; map.map.setView([g.lat, g.lon], 10); selectLocation(g.lat, g.lon, `${g.name}${g.region ? ', ' + g.region : ''}`); } }, `${g.name}${g.region ? ', ' + g.region : ''}${g.country ? ', ' + g.country : ''}`));
+  box.classList.toggle('hidden', !box.children.length);
 }
 
 // ---------------- location ----------------

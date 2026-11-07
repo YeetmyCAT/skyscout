@@ -566,7 +566,7 @@ export class Structures {
       for (const t of this.ctx.canopyTrees) {
         if (trees.length > max) break;
         if (!ok(t.x, t.z) || taken(t.x, t.z)) continue;
-        if (this.ground.isWater(t.x, t.z) || this.onPavement(t.x, t.z, 1.2) || this.nearBuilding(t.x, t.z, 3.5)) continue;   // also covers "inside a footprint"
+        if (this.ground.isWater(t.x, t.z) || this.onPavement(t.x, t.z, 1.2) || this.nearBuilding(t.x, t.z, 2.5)) continue;   // also covers "inside a footprint"
         if (this.ctx.farms && this.ctx.farms.isCrop && this.ctx.farms.isCrop(t.x, t.z)) continue;
         trees.push(t); occ.add(ck(t.x, t.z));
       }
@@ -822,13 +822,17 @@ export class Structures {
     if (this.ctx.estimateLamps) {
       const half = this.ctx.detail * 2.4;
       const mappedNear = osm.lamps.length;
+      // Guessed lamps only on paved town and suburban streets and highways (or roads mapped lit=yes). Never on
+      // alleys, service lanes, driveways, tracks, unpaved roads or rural roads, which are mostly unlit.
+      const UNPAVED = /unpaved|gravel|dirt|ground|grass|sand|compacted|earth|mud|pebble|wood|rock|clay/;
       for (const r of osm.roads) {
-        if (!/primary|secondary|tertiary|residential|trunk|unclassified|living_street/.test(r.kind)) continue;
+        if (!/^(motorway|trunk|primary|secondary|tertiary)(_link)?$|^(residential|living_street)$/.test(r.kind)) continue;
+        if (UNPAVED.test(r.surface || '')) continue;
         const pts = ringLocalLine(this.local, r.line);
-        const urban = this.ctx.urbanAt(pts[0][0], pts[0][1]);
-        if (!r.lit && urban < 0.35) continue;
+        const mid = pts[pts.length >> 1], urban = Math.max(this.ctx.urbanAt(pts[0][0], pts[0][1]), this.ctx.urbanAt(mid[0], mid[1]));
+        if (!r.lit && urban < 0.45) continue;
         if (mappedNear > 50 && !r.lit) continue;
-        const sp = r.kind === 'residential' ? 45 : 38, off = r.kind === 'residential' ? 4.5 : 7;
+        const big = /^(motorway|trunk)/.test(r.kind), sp = r.kind === 'residential' ? 45 : big ? 55 : 38, off = r.kind === 'residential' ? 4.5 : big ? 14 : /primary/.test(r.kind) ? 9 : 7;   // poles beside the carriageway
         let acc = hash(pts.length) * sp, side = 1;
         for (let i = 0; i < pts.length - 1; i++) {
           const a = pts[i], b = pts[i + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (!L) continue;
@@ -970,21 +974,39 @@ export class Structures {
   }
 
   // Lit areas: industrial yards, power plants, sports fields, parking lots, petrol stations.
+  // Every lamp stands on a pole. Guessed lamps (yards, parking) follow the "likely lights" setting and only go
+  // on pavement or right beside a road; lamps of mapped lit sports fields and power plants are always shown.
   buildAreas(osm) {
-    const half = this.ctx.detail * 2.4;
-    const addArea = (ring, lux, c, lampEvery, lampCd, lampC) => {
+    const half = this.ctx.detail * 2.4, poles = [], est = this.ctx.estimateLamps;
+    const lamp = (x, z, h, cd, cc) => { const g = this.h(x, z); this.lamps.push({ x, z, y: g + h, cd, r: 1, i: 0, c: [0, 0, 0], cc }); poles.push([x, g, z, h]); this.col.circles.push({ x, z, r: 0.3, top: g + h }); };
+    const addArea = (ring, lux, c, lampEvery, lampCd, lampC, opt = {}) => {
       const p = ringLocal(this.local, ring); if (p.length < 3 || !p.some(([x, z]) => Math.abs(x) < half * 2 && Math.abs(z) < half * 2)) return;
       this.areas.push({ ring: p, c: c.map(v => Math.min(255, v * lux / 40)) });
-      if (lampEvery) {
-        let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; p.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); });
-        let n = 0;
-        for (let x = x0; x < x1 && n < 60; x += lampEvery) for (let z = z0; z < z1 && n < 60; z += lampEvery) if (pointInPoly(x, z, p)) { this.lamps.push({ x, z, y: this.h(x, z) + 12, cd: lampCd, r: 1, i: 0, c: [0, 0, 0], cc: lampC }); n++; }
+      if (!lampEvery) return;
+      if (opt.edges) {   // floodlight masts around a lit sports field
+        const step = Math.max(1, Math.floor(p.length / 6));
+        for (let k = 0; k < p.length; k += step) lamp(p[k][0], p[k][1], 18, lampCd, lampC);
+        return;
+      }
+      let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; p.forEach(([x, z]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); });
+      let n = 0;
+      for (let x = x0; x < x1 && n < 60; x += lampEvery) for (let z = z0; z < z1 && n < 60; z += lampEvery) {
+        if (!pointInPoly(x, z, p)) continue;
+        if (opt.nearRoad && !this.onPavement(x, z, 8)) continue;   // yards: only where there is pavement, never open ground
+        lamp(x, z, opt.h || 12, lampCd, lampC); n++;
       }
     };
-    for (const a of osm.industrial) addArea(a.ring, a.plant ? 18 : 6, [255, 170, 90], a.plant ? 60 : 110, a.plant ? 9000 : 4000, [1, 0.62, 0.3]);
-    for (const a of osm.lit) addArea(a.ring, 25, [240, 240, 255], 70, 30000, [0.95, 0.95, 1]);
-    for (const a of osm.parking) addArea(a.ring, 8, [235, 235, 255], 35, 2500, [0.95, 0.95, 1]);
-    for (const f of osm.fuel) if (f.ring) addArea(f.ring, 120, [245, 245, 255], 0, 0); else { const [x, y] = this.local.toXY(f.p[0], f.p[1]); this.lamps.push({ x, z: -y, y: this.h(x, -y) + 5, cd: 15000, r: 30, i: 1, c: [245, 245, 255], cc: [0.95, 0.95, 1] }); }
+    for (const a of osm.industrial) if (a.plant || est) addArea(a.ring, a.plant ? 18 : 6, [255, 170, 90], a.plant ? 60 : 110, a.plant ? 9000 : 4000, [1, 0.62, 0.3], { nearRoad: !a.plant });
+    for (const a of osm.lit) addArea(a.ring, 25, [240, 240, 255], 70, 30000, [0.95, 0.95, 1], { edges: true });
+    for (const a of osm.parking) addArea(a.ring, est ? 8 : 0, [235, 235, 255], est ? 35 : 0, 2500, [0.95, 0.95, 1], { h: 9 });
+    for (const f of osm.fuel) if (f.ring) addArea(f.ring, 120, [245, 245, 255], 0, 0); else { const [x, y] = this.local.toXY(f.p[0], f.p[1]); const g = this.h(x, -y); this.lamps.push({ x, z: -y, y: g + 5, cd: 15000, r: 30, i: 1, c: [245, 245, 255], cc: [0.95, 0.95, 1] }); poles.push([x, g, -y, 5]); }
+    if (poles.length) {
+      const geo = new THREE.CylinderGeometry(0.07, 0.11, 1, 5).translate(0, 0.5, 0);
+      geo.setAttribute('aInfo', new THREE.Float32BufferAttribute(new Float32Array(geo.attributes.position.count * 4), 4));
+      const im = new THREE.InstancedMesh(geo, plainLit(this.U, 0x5a5a5a), poles.length), M = new THREE.Matrix4();
+      poles.forEach((q, k) => { M.makeScale(1 + q[3] / 30, q[3], 1 + q[3] / 30); M.setPosition(q[0], q[1], q[2]); im.setMatrixAt(k, M); });
+      im.frustumCulled = false; this.group.add(im);
+    }
   }
   update(time, frameInfo) { for (const f of this.anim) f(time); }
   dispose() { this.group.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); }); }

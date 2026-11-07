@@ -5,6 +5,7 @@ import { SkyEvents } from './skyevents.js';
 import { loadKp, kpAt, auroraParams, MAG_POLE, ecef, enuBasis, magLat, loadSatellites } from '../space.js';
 import { loadNoise, makeCloudPass, weatherTextures, R_EFF } from './clouds.js';
 import { Ground, Grass, distantLights } from './ground.js';
+import { roadMasks } from '../terrain.js';
 import { Structures } from './structures.js';
 import { Farms, CROP_NAMES } from './farms.js';
 import { Precip, Lightning, FarStorms, WxAudio } from './weatherfx.js';
@@ -123,13 +124,15 @@ export class Immersive {
     if (this.structures) { this.structures.dispose(); this.structures = null; }
     const { local, groundZ } = ctx;
     this.ground = new Ground(this.U, local, groundZ, this.q);
+    const roadsP = roadMasks(local).catch(() => null);   // in parallel with the terrain
     await this.ground.build(progress);
     ctx.groundZ = this.ground.groundZ;
     this.groundObj = this.ground.group; this.main.add(this.groundObj);
     progress('Placing grass and city lights…');
     this.season = seasonFor(ctx.lat, ctx.time || new Date(), ctx.point);
     this.grass = new Grass(this.U, this.ground, { mobile: this.mobile, season: this.season }); this.main.add(this.grass.mesh);
-    this.cityLights = distantLights(this.U, ctx.lights, local, (x, z) => this.ground.heightAt(x, z), 3500, this.mobile);
+    this.roadMask = await roadsP;
+    this.cityLights = distantLights(this.U, ctx.lights, local, (x, z) => this.ground.heightAt(x, z), 3500, this.mobile, this.roadMask);
     if (this.cityLights) this.fg.add(this.cityLights);
     // ground flux for cloud bases
     if (ctx.lights) {
@@ -183,7 +186,7 @@ export class Immersive {
     this.escape();
     // replace far-light points with a version that skips the structures zone
     if (this.cityLights) { this.cityLights.removeFromParent(); }
-    this.cityLights = distantLights(this.U, ctx.lights, ctx.local, (x, z) => this.ground.heightAt(x, z), opts.detail * 2.4, this.mobile);
+    this.cityLights = distantLights(this.U, ctx.lights, ctx.local, (x, z) => this.ground.heightAt(x, z), opts.detail * 2.4, this.mobile, this.roadMask);
     if (this.cityLights) this.fg.add(this.cityLights);
     this.applyTimeDependent();
     s.stats.farms = Object.entries(farms.counts).map(([k, n]) => `${n} ${CROP_NAMES[k] || k}`).join(', ');
@@ -487,6 +490,7 @@ export class Immersive {
     {
       const sqm = lum2mag(Math.max(this.adaptL, 1e-5)), lim = 7.93 - 5 * Math.log10(Math.pow(10, 4.316 - sqm / 5) + 1);
       const simDate = new Date(this.date.getTime() + (performance.now() - (this.dateSetAt || performance.now())));   // satellites keep moving in real time
+      U.uAGT.value = (simDate.getTime() / 1000) % 864000;   // airglow waves drift with the clock and the time slider
       const m = this.U.uEqToWorld.value.elements, rm = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
       this.events.update(now, simDate, this.ctx, rm, lim, this.sm.sun.alt);
     }

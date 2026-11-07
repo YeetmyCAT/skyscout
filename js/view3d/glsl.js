@@ -28,8 +28,14 @@ float ign(vec2 px){ return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.0
 // Horizon haze colour. Under a cloud deck it is lit by the dim cloud base, not the open sky,
 // and loses the bright forward-scattering glow around the hidden Sun.
 vec3 hazeL(vec3 dir){
-  vec3 a = skyL(normalize(vec3(dir.x, max(dir.y, 0.01), dir.z)));
+  vec3 hd = normalize(vec3(dir.x, max(dir.y, 0.01), dir.z));
+  vec3 a = skyL(hd);
   vec3 b = 0.5*(skyL(normalize(vec3(-uSunDir.x, 0.05, -uSunDir.z) + 1e-4)) + skyL(normalize(vec3(uSunDir.z, 0.05, -uSunDir.x) + 1e-4)));
+  // Looking down, the horizon sample at the same azimuth carries the sun's forward-scattering glow, which would
+  // paint a bright stripe from the low sun to the nadir. The real scattering angle is wider, so fade toward the
+  // side-lit haze as the view direction moves away from the sun.
+  float lost = dot(hd, uSunDir) - dot(normalize(dir), uSunDir);
+  a = mix(a, b, clamp(lost * 14.0, 0.0, 1.0));
   return mix(a, b, uOvercast) * (1.0 - 0.78*uOvercast);
 }
 // Open water: wind ripples, Fresnel reflection of the sky (and skyglow at night), sun/moon glint.

@@ -264,7 +264,9 @@ export class Grass {
 }
 
 // Distant lights: thousands of point lights scattered by VIIRS radiance (towns, highways) on the terrain.
-export function distantLights(U, lights, local, heightAt, excludeHalf, mobile) {
+// Far city lights from the VIIRS night map. With a road mask they are placed only on real streets inside lit
+// pixels (never in the fields around a town); a lit pixel with no road in it gets no lights.
+export function distantLights(U, lights, local, heightAt, excludeHalf, mobile, roads) {
   const pos = [], inten = [], col = [];
   const max = mobile ? 25000 : 60000;
   if (!lights) return null;
@@ -274,12 +276,15 @@ export function distantLights(U, lights, local, heightAt, excludeHalf, mobile) {
   let seed = 1;
   for (let i = 0; i < P.length && pos.length / 3 < max; i += 5) {
     if (P[i + 3] > 45) continue;
+    if (roads && P[i + 4] < 3) continue;   // dim pixels: unlit rural roads and the glow spilling around towns
     const [x, y] = local.toXY(P[i], P[i + 1]), z = -y;
     if (Math.abs(x) < excludeHalf && Math.abs(z) < excludeHalf) continue;
     const nL = Math.min(40, Math.floor(P[i + 2] / per + hash(seed++)));
     const pxM = 40075000 * Math.cos(local.lat0 * Math.PI / 180) / 256 / 256;
-    for (let k = 0; k < nL; k++) {
+    for (let k = 0, tries = 0; k < nL && tries < nL * 8; tries++) {
       const xx = x + (hash(seed++) - 0.5) * pxM, zz = z + (hash(seed++) - 0.5) * pxM;
+      if (roads && roads.onRoad(xx, zz) === false) continue;
+      k++;
       pos.push(xx, heightAt(xx, zz) + 6, zz);
       inten.push(0.5 + hash(seed++));
       const warm = hash(seed++) < 0.55; col.push(...(warm ? [1, 0.72, 0.42] : [0.95, 0.93, 1]));

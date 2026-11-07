@@ -69,7 +69,7 @@
       <div class="row"><button id="loadStruct" class="btn primary">Load buildings, trees, lights, power lines</button></div>
       <div class="row small"><label>Detail radius <select id="structDetail"><option value="700">0.7 km (fast)</option><option value="1500" selected>1.5 km</option><option value="2500">2.5 km</option><option value="4000">4 km (heavy)</option></select></label></div>
       <div class="row small"><label><input type="checkbox" id="estTrees" checked> Add unmapped trees found in ~1 m aerial photos (parks, yards, streets)</label></div>
-      <div class="row small"><label><input type="checkbox" id="estLamps" checked> Add likely street lights on lit urban roads</label></div>
+      <div class="row small"><label><input type="checkbox" id="estLamps" checked> Add likely lights (town streets, parking lots, yards)</label></div>
       <div class="small muted" id="structStatus"></div>
       <div class="cardhead">Look</div>
       <div class="row"><label>Exposure <input type="range" id="ev" min="-3" max="3" step="0.25" value="0"></label></div>
@@ -100,7 +100,7 @@
     <p class="small muted">Free keys come from developer.tomtom.com. Without a key, drive times use OSRM routing with a typical-traffic estimate for the time of day.</p>
     <label class="row">Units <select id="units"><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
     <div class="row"><button id="clearCache" class="btn">Clear saved data</button> <button id="closeSettings" class="btn primary">Done</button></div>
-    <p class="small muted">Data: Open-Meteo (ECMWF, GFS, ICON, GEM, UKMO, Météo-France, JMA, CAMS), backup forecasts: MET Norway / Norwegian Meteorological Institute (CC BY 4.0) and US National Weather Service, NASA GIBS (GOES, Himawari, VIIRS Black Marble), Mapzen/AWS Terrain Tiles, Esri World Imagery, © OpenStreetMap contributors (Overpass), OSRM, RainViewer. Astronomy: astronomy-engine. Stars: Hipparcos/Tycho via d3-celestial. Milky Way: ESO/S. Brunier (CC BY 4.0). Light Pollution Atlas: D. Lorenz (VIIRS). Buildings, addresses, land cover: Overture Maps Foundation (incl. Microsoft and Google footprints). Aurora: NOAA SWPC Kp. Satellites: CelesTrak, satellite.js. Routing: OSRM, Valhalla (FOSSGIS).</p>
+    <p class="small muted">Data: Open-Meteo (ECMWF, GFS, ICON, GEM, UKMO, Météo-France, JMA, CAMS), backup forecasts: MET Norway / Norwegian Meteorological Institute (CC BY 4.0) and US National Weather Service, NASA GIBS (GOES, Himawari, VIIRS Black Marble), Mapzen/AWS Terrain Tiles, Esri World Imagery, © OpenStreetMap contributors (Overpass), OSRM, RainViewer. Astronomy: astronomy-engine. Stars: Hipparcos/Tycho via d3-celestial. Milky Way: ESO/S. Brunier (CC BY 4.0). Light Pollution Atlas: D. Lorenz (VIIRS). Buildings, addresses, land cover: Overture Maps Foundation (incl. Microsoft and Google footprints). Aurora: NOAA SWPC Kp. Satellites: CelesTrak, satellite.js. Routing: OSRM, Valhalla (FOSSGIS). Place search: Open-Meteo, Photon (komoot). Distant lights placed on roads from Esri Light Gray Canvas.</p>
   </div>
 </div>
 

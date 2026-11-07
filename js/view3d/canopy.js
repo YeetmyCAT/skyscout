@@ -1,7 +1,8 @@
 // Individual tree crowns found in high-resolution aerial photos (Esri World Imagery, ~0.9-1.8 m/pixel).
 // No global tree database can be read from a browser (Meta's 1 m canopy map and city inventories aren't
 // served with CORS; 10 m land cover calls whole suburbs "built"), so crowns are found where the photo shows
-// them: vegetation darker and less saturated than the surrounding lawn. Conservative: unsure spots get no tree.
+// them: vegetation darker and less saturated than the surrounding lawn. Leans toward a tree in uncertain green
+// space, but never on smooth open lawn, pavement, roofs or water.
 import { imageryCanvas } from '../terrain.js';
 
 export async function detectCanopy(local, half, mobile) {
@@ -32,25 +33,25 @@ export async function detectCanopy(local, half, mobile) {
   for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x; if (!V[i]) continue;
     const fv = Math.max(box(IV, x, y, rb), 1e-3), vL = box(ILV, x, y, rb) / fv, vGR = box(IGV, x, y, rb) / fv - 256;
-    if ((L[i] < vL - 7 && L[i] < 120 && GR[i] < vGR - 5) || (L[i] < 60 && GR[i] < 12)) T[i] = 1;
+    if ((L[i] < vL - 4 && L[i] < 120 && GR[i] < vGR - 2) || (L[i] < 60 && GR[i] < 12)) T[i] = 1;
   }
   const IT = integ(T), r = Math.max(1, Math.round(2.2 / m));   // ~4.5 m window: one small crown
   const step = Math.max(1, Math.round(2 / m)), G = Math.floor(W / step), S = new Float32Array(G * G);
   for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
     const x = gx * step + (step >> 1), y = gy * step + (step >> 1);
-    S[gy * G + gx] = Math.min(1, Math.max(0, (box(IT, x, y, r) - 0.4) / 0.3)) * Math.max(0, 1 - box(IB, x, y, r) * 4);
+    S[gy * G + gx] = Math.min(1, Math.max(0, (box(IT, x, y, r) - 0.3) / 0.3)) * Math.max(0, 1 - box(IB, x, y, r) * 4);
   }
   // crowns: strongest cells first, one tree per ~5.5 m, crown size from how much canopy surrounds it
-  const cells = []; for (let i = 0; i < G * G; i++) if (S[i] > 0.4) cells.push(i);
+  const cells = []; for (let i = 0; i < G * G; i++) if (S[i] > 0.3) cells.push(i);
   cells.sort((a, b) => S[b] - S[a]);
   const cs = step * m, minD = 5.5 / cs, taken = new Uint8Array(G * G), out = [], rr = Math.ceil(minD);
-  const cap = mobile ? 6000 : 16000;
+  const cap = mobile ? 8000 : 20000;
   for (const i of cells) {
     if (taken[i]) continue;
     const gx = i % G, gy = (i / G) | 0;
     let cover = 0, n = 0;
     for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) { const x = gx + dx, y = gy + dy; if (x < 0 || y < 0 || x >= G || y >= G) continue; n++; if (S[y * G + x] > 0.2) cover++; }
-    if (cover / n < 0.25) continue;                        // a lone rough green speck, not a crown
+    if (cover / n < 0.15) continue;                        // a lone rough green speck, not a crown
     for (let dy = -rr; dy <= rr; dy++) for (let dx = -rr; dx <= rr; dx++) { const x = gx + dx, y = gy + dy; if (x >= 0 && y >= 0 && x < G && y < G && dx * dx + dy * dy <= minD * minD) taken[y * G + x] = 1; }
     const wx = (gx + 0.5) * cs - half, wz = (gy + 0.5) * cs - half;   // canvas row 0 is north = -z
     out.push({ x: wx, z: wz, h: 7 + 11 * (cover / n) * (0.8 + 0.4 * S[i]), est: true, kind: -1 });

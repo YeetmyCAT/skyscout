@@ -18,6 +18,11 @@ export function makeSkyLUT(renderer, U) {
       uniform vec3 uSunDir, uMoonDir, uSunE, uMoonE;
       uniform float uAOD, uObsKm, uExposure, uNatSky, uLPScale, uTime;
       uniform sampler2D uLPSky; uniform float uHasLP;
+      uniform float uAGT;   // simulated time for airglow motion (s, wrapped)
+      float agHash(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+      float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+        return mix(mix(agHash(i), agHash(i+vec2(1,0)), f.x), mix(agHash(i+vec2(0,1)), agHash(i+vec2(1,1)), f.x), f.y); }
+      float fbm3(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++){ s += a*vnoise(p); p = p*2.03 + 17.1; a *= 0.5; } return s/0.875; }
       uniform mat3 uEclip; // world -> ecliptic frame (for zodiacal light)
       const float Rg = 6360.0, Rt = 6460.0;
       const vec3 bR = vec3(5.802e-3, 13.558e-3, 33.1e-3);
@@ -77,8 +82,31 @@ export function makeSkyLUT(renderer, U) {
         float X = 1.0/(sin(hp) + 0.025*exp(-11.0*sin(hp)));
         float extn = exp(-0.25*min(X, 30.0));
         // Airglow: green 557.7 nm layer (~95 km) with slow gravity-wave banding, a weak red 630 nm layer above it.
+        // Structure lives on the 95 km layer itself: find where this line of sight crosses it (km east/north of us),
+        // then lay gravity waves on that patch of sky. Seen from below, distant wave crests crowd into bands that
+        // converge toward the horizon, like long-exposure photos show. Waves drift at 30-80 m/s and slowly evolve.
         float azr = atan(rd.x, -rd.z);
-        float waves = 0.75 + 0.5*(sin(azr*7.0 + hp*30.0 + uTime*0.01)*0.5 + 0.5) * smoothstep(0.0, 0.25, hp + 0.05);
+        float dGround = 6371.0*(acos(clamp(6371.0*cos(hp)/6466.0, -1.0, 1.0)) - hp);   // km along the ground
+        vec2 P = dGround*vec2(sin(azr), cos(azr));
+        float t = uAGT;
+        // main wave field: its direction wanders over ~800 km, crests wiggle, and it comes in patches
+        vec2 u = vec2(sin(azr), cos(azr));
+        float Lp = min(8.0/max(tan(hp), 0.02), 400.0);   // path through the ~8 km thick layer: low views blur crests that face us
+        float th = 6.2832*vnoise(P/800.0 + vec2(4.2, t*0.3e-4));
+        vec2 k1 = vec2(cos(th), sin(th));
+        float ph = dot(P, k1)*6.2832/85.0 + 5.0*fbm3(P/220.0 + vec2(t*0.5e-4, -3.3)) - t*6.2832*0.05/85.0;
+        float pk = smoothstep(0.42, 0.68, fbm3(P/380.0 + vec2(t*0.4e-4, 1.7)));
+        float a1 = dot(k1, u)*6.2832/85.0*Lp;
+        float w1 = sin(ph)*pk*exp(-a1*a1/24.0);
+        // shorter ripples in small patches, running another way
+        vec2 k2 = vec2(cos(th + 1.3), sin(th + 1.3));
+        float ph2 = dot(P, k2)*6.2832/30.0 + 3.0*fbm3(P/70.0 + vec2(9.1, t*1.0e-4)) - t*6.2832*0.04/30.0;
+        float pk2 = smoothstep(0.52, 0.72, fbm3(P/150.0 + vec2(t*1.5e-4, 6.6)));
+        float a2 = dot(k2, u)*6.2832/30.0*Lp;
+        float w2 = sin(ph2)*pk2*exp(-a2*a2/24.0);
+        float broad = fbm3(P/450.0 + vec2(t*0.3e-4, 2.0)) - 0.5;          // broad brighter and dimmer regions
+        float far = smoothstep(1500.0, 500.0, dGround), farR = smoothstep(600.0, 200.0, dGround);
+        float waves = 0.92 + 0.36*w1*far + 0.18*w2*farR + 0.5*broad;      // averages 1: brightness unchanged
         float vrR = 1.0/sqrt(1.0 - 0.93*cos(hp)*cos(hp));
         vec3 airglow = (vec3(0.55, 1.0, 0.5) * 0.36 * vr * waves + vec3(1.0, 0.25, 0.2) * 0.07 * vrR) * uNatSky * extn;
         // Zodiacal light from the dust in the ecliptic: brightness in S10 units fitted to Leinert et al. (1998),
@@ -97,7 +125,7 @@ export function makeSkyLUT(renderer, U) {
       }`,
   });
   Object.assign(U, {
-    uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
+    uAGT: { value: 0 }, uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
     uEclip: { value: new THREE.Matrix3() },
   });
   const scene = new THREE.Scene(), cam = new THREE.Camera();
@@ -150,10 +178,15 @@ export function makeSkyBackground(U, mwTex) {
           col += uSunE * 2.15e4 * limb * directT(uSunDir.y) * uExposure * smoothstep(-0.02, 0.0, sh);
         }
         // Milky Way from an all-sky photograph (ESO/S. Brunier), stars removed, mapped in galactic coordinates
+        // (coordinates and their screen derivatives outside the branch, where derivatives are well defined)
+        vec3 mwE = transpose(uEqToWorld) * d;
+        vec3 g = uGal * mwE; float gl = atan(g.y, g.x), gb = asin(clamp(g.z,-1.0,1.0));
+        // longitude wraps from 1 to 0 at l = 180 deg: take the mip-level gradients across the wrap, or that pixel
+        // column picks the blurriest level and draws a thin seam through the sky
+        vec2 mwUV = vec2(0.5 - gl/(2.0*PI), 0.5 + gb/PI);
+        vec2 gx = dFdx(mwUV), gy = dFdy(mwUV); gx.x -= floor(gx.x + 0.5); gy.x -= floor(gy.x + 0.5);
         if (sh > -0.05) {
-          vec3 e = transpose(uEqToWorld) * d;
-          vec3 g = uGal * e; float gl = atan(g.y, g.x), gb = asin(clamp(g.z,-1.0,1.0));
-          vec3 mw = texture(uMW, vec2(0.5 - gl/(2.0*PI), 0.5 + gb/PI)).rgb; mw *= mw;   // stored sqrt-encoded
+          vec3 mw = textureGrad(uMW, mwUV, gx, gy).rgb; mw *= mw;   // stored sqrt-encoded
           vec3 T = directT(max(sh, 0.0));
           col += mw * 1.3e-3 * uMWScale * uExposure * T * smoothstep(-0.05, 0.03, sh);
         }
