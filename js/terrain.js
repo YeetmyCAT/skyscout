@@ -2,6 +2,19 @@
 import { tilePixels, cachedBlob, lon2x, lat2y, x2lon, y2lat, pool } from './util.js';
 
 const TERRARIUM = (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+// Esri's dark-gray canvas basemap paints all water one flat dark colour: a clean water mask.
+export const WATERBASE = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${z}/${y}/${x}`;
+export const isWaterPixel = (r, g, b) => r < 56 && g < 56 && b < 62 && b >= r;
+// Mask canvas: white where water, black on land.
+export async function waterMaskCanvas(local, halfSize, z, px = 1024) {
+  const c = await imageryCanvas(local, halfSize, z, px, WATERBASE).catch(() => null);
+  if (!c) return null;
+  const g = c.getContext('2d', { willReadFrequently: true }), d = g.getImageData(0, 0, px, px), a = d.data;
+  // the canvas starts filled with an earthy colour, so untiled areas read as land
+  for (let i = 0; i < a.length; i += 4) { const w = isWaterPixel(a[i], a[i + 1], a[i + 2]) ? 255 : 0; a[i] = a[i + 1] = a[i + 2] = w; a[i + 3] = 255; }
+  g.putImageData(d, 0, 0);
+  return c;
+}
 export const IMAGERY = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
 
 // Height sampler over tiles at zoom z covering a lat/lon box. Bilinear, metres.
@@ -32,13 +45,13 @@ export async function heightField(lat, lon, radiusM, z) {
 }
 
 // Imagery mosaic as a canvas aligned to a local square (metres), for the ground texture.
-export async function imageryCanvas(local, halfSize, z, px = 2048) {
+export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGERY) {
   const [latN, lonW] = local.toLL(-halfSize, halfSize), [latS, lonE] = local.toLL(halfSize, -halfSize);
   const x0 = Math.floor(lon2x(lonW, z)), x1 = Math.floor(lon2x(lonE, z));
   const y0 = Math.floor(lat2y(latN, z)), y1 = Math.floor(lat2y(latS, z));
   if ((x1 - x0 + 1) * (y1 - y0 + 1) > 100) return null;
   const list = []; for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) list.push({ x, y });
-  const imgs = await pool(list, 6, async t => { const b = await cachedBlob(IMAGERY(z, t.x, t.y), 120 * 864e5); return b ? { ...t, bmp: await createImageBitmap(b).catch(() => null) } : null; });
+  const imgs = await pool(list, 6, async t => { const b = await cachedBlob(urlFn(z, t.x, t.y), 120 * 864e5); return b ? { ...t, bmp: await createImageBitmap(b).catch(() => null) } : null; });
   const cv = document.createElement('canvas'); cv.width = cv.height = px;
   const g = cv.getContext('2d'); g.fillStyle = '#4a5a3a'; g.fillRect(0, 0, px, px);
   // Map each tile's mercator box into local metres (small-area approximation is fine here).
@@ -50,4 +63,22 @@ export async function imageryCanvas(local, halfSize, z, px = 2048) {
     g.drawImage(t.bmp, sx(ax), sy(ay), sx(bx) - sx(ax), sy(by) - sy(ay));
   }
   return n ? cv : null;
+}
+
+// Open water at points, from the Esri dark-gray basemap (water is one flat dark colour).
+export async function waterMany(points, z = 14) {
+  const out = [];
+  for (const [la, lo] of points) {
+    const fx = lon2x(lo, z), fy = lat2y(la, z), tx = Math.floor(fx), ty = Math.floor(fy);
+    const px = await tilePixels(WATERBASE(z, tx, ty), 120 * 864e5);
+    if (!px) { out.push(false); continue; }
+    const cx = Math.floor((fx - tx) * px.w), cy = Math.floor((fy - ty) * px.h);
+    let wet = 0, n = 0;
+    for (let dy = -2; dy <= 2; dy += 2) for (let dx = -2; dx <= 2; dx += 2) {
+      const x = Math.max(0, Math.min(px.w - 1, cx + dx)), y = Math.max(0, Math.min(px.h - 1, cy + dy)), k = (y * px.w + x) * 4;
+      if (isWaterPixel(px.data[k], px.data[k + 1], px.data[k + 2])) wet++; n++;
+    }
+    out.push(wet / n > 0.5);
+  }
+  return out;
 }

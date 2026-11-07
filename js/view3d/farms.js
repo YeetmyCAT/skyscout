@@ -299,6 +299,7 @@ export class Farms {
         const a = k / ring * 2 * Math.PI + r;
         let x = Math.round(c.x / step) * step + Math.cos(a) * r, z = Math.round(c.z / step) * step + Math.sin(a) * r;
         const f = fieldAt(x, z); if (!f) continue;
+        if (this.ground.isWater(x, z)) continue;
         const rowSp = f.t === 0 || f.t === 1 || f.t === 6 ? 0.76 : f.t === 9 ? 2.6 : f.t === 7 ? 1.5 : 0;
         if (rowSp) { // snap to crop rows
           const dx = -Math.sin(f.ang), dz = Math.cos(f.ang), across = x * dx + z * dz, snapped = Math.round(across / rowSp) * rowSp;

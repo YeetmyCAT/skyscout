@@ -6,6 +6,7 @@ import { quickLP, QUICK, NAT_SKY, lum2mag, bortle } from './lightpol.js';
 import { driveTable, congestion, roadWeatherFactor, roadHazards, route } from './routing.js';
 import { atlasMany, ratioToSqm } from './atlas.js';
 import { terrainHorizons, localObstructions, horizonScore, horizonWorst } from './horizon.js';
+import { waterMany } from './terrain.js';
 
 const SCOUT_VARS = ['temperature_2m', 'dew_point_2m', 'relative_humidity_2m', 'cloud_cover', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'visibility',
   'precipitation', 'snowfall', 'snow_depth', 'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'wind_speed_250hPa'];
@@ -83,13 +84,27 @@ export async function scout(home, opts, progress = () => { }) {
   const maxH = opts.maxDriveH || radiusKm / 70;
   const urbanHome = clamp(Math.log10(1 + (regional ? quickLP(regional, home[0], home[1]).zen * QUICK.zen / NAT_SKY : 1)) / 1.5, 0, 0.8);
   let all = res.map((r, i) => {
-    const d = dt[i]; if (!d || !d.snap || d.snapDist > 2500) return null;   // water, or nowhere near a road
-    r.p = d.snap; r.snapDist = d.snapDist;
+    const d = dt[i]; if (!d || !d.snap) return null;
+    if (opts.allowOffRoad) {
+      // keep the dark spot itself; drive to the nearest road point and walk the rest (up to 3 km)
+      if (d.snapDist > 3000) return null;
+      r.parkAt = d.snap; r.walk = d.snapDist;
+    } else {
+      if (d.snapDist > 2500) return null;   // water, or nowhere near a road
+      r.p = d.snap; r.parkAt = d.snap; r.walk = 0;
+    }
+    r.snapDist = d.snapDist;
     r.dist = haversine(home[0], home[1], r.p[0], r.p[1]) / 1000;
     r.drive = d.dur; r.roadDist = d.dist;
     r.driveTraffic = r.drive * (1 + (cong - 1) * urbanHome * Math.min(1, 25000 / Math.max(5000, r.roadDist || 1))) * r.roadK;
     return r;
   }).filter(Boolean);
+  // Walk-in spots: drop any that sit on open water (aerial photo colour)
+  if (opts.allowOffRoad) {
+    progress('Checking walk-in spots for water…');
+    const wet = await waterMany(all.filter(r => r.walk > 60).map(r => r.p));
+    let k = 0; all = all.filter(r => !(r.walk > 60 && wet[k++]));
+  }
   // Darkness at the snapped spot from the light pollution atlas (VIIRS); horizon glow from the regional model.
   progress('Reading the light pollution atlas…');
   const at = await atlasMany(all.map(r => r.p)).catch(() => []);

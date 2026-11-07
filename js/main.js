@@ -506,7 +506,7 @@ async function loadStructuresNow() {
     const lat = v.ctx.lat, al = Math.abs(lat), coniferShare = al > 58 ? 0.92 : al > 50 ? 0.6 : al > 42 ? 0.35 : al < 23 ? 0 : 0.2;
     const urban = v.urban ? ((x, z) => { const [la, lo] = v.ctx.local.toLL(x, -z); return v.urban(la, lo); }) : (() => 0);
     const stats = v.setStructures(osm, { detail, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
-    st.textContent = `Loaded ${stats.buildings} buildings, ${stats.trees} trees, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}`;
+    st.textContent = `Loaded ${stats.buildings} buildings${stats.addrHouses ? ` (${stats.addrHouses} added at unmapped addresses)` : ''}, ${stats.trees} trees, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}`;
   } catch (e) { st.textContent = 'Could not load map data: ' + e.message; }
   btn.disabled = false;
 }
@@ -522,6 +522,7 @@ function renderScoutTab() {
     <div class="row"><label>Max drive <select id="scDrive"><option value="0.75">45 min</option><option value="1">1 h</option><option value="1.5" selected>1.5 h</option><option value="2">2 h</option><option value="3">3 h</option><option value="4">4 h</option></select></label>
     <label>Night <select id="scNight"><option value="0">Tonight</option><option value="1">Tomorrow</option><option value="2">In 2 nights</option></select></label></div>
     <div class="row"><label>Goal <select id="scGoal"><option value="mw">Milky Way / wide-field</option><option value="deep">Deep-sky imaging</option><option value="land">Nightscape (moon OK)</option><option value="planet">Planets / Moon (seeing)</option></select></label></div>
+    <div class="row"><label>Access <select id="scRoad"><option value="road">Right next to a road (no walking)</option><option value="walk">Walk-in spots OK (up to 3 km)</option></select></label></div>
     <div class="row"><label>Rank by <select id="scRank"><option value="score">Everything (overall score)</option><option value="clear">Clear sky only</option><option value="dark">Darkness / light pollution only</option><option value="horizon">Open horizon only</option><option value="weather">Weather only (clouds, fog, haze)</option><option value="drive">Shortest drive</option><option value="seeing">Seeing only</option></select></label></div>
     <button class="btn primary big" id="scGo">Find the best spots</button>
     <div id="scProg" class="small muted"></div><div id="scList"></div>`;
@@ -542,9 +543,9 @@ async function runScout() {
     // tie the quick estimator to the full model where both exist
     if (regional && S.data && S.data.lp && Math.abs(S.data.lat - home[0]) < 1e-6) { const q = quickLP(regional, home[0], home[1]); if (q.zen > 0) QUICK.zen = clamp(S.data.lp.zenith / q.zen, 3e-7, 3e-5); const hz = S.data.lp.horizon.reduce((a, b) => a + b, 0) / S.data.lp.horizon.length; if (q.hor > 0 && hz > 0) QUICK.hor = clamp(hz / q.hor, 1e-7, 1e-4); }
     const depart = new Date(Math.max(Date.now(), (night.sunset || d0).getTime() - maxH * 3600e3));
-    const res = await scout(home, { radiusKm, night, regional, departLocal: depart, weights: W, maxDriveH: maxH }, prog);
+    const res = await scout(home, { radiusKm, night, regional, departLocal: depart, weights: W, maxDriveH: maxH, allowOffRoad: $('#scRoad').value === 'walk' }, prog);
     res.night = night; res.home = home; res.regional = regional; res.depart = depart;
-    S.scoutRes = res; prog(`Checked ${res.sites.length} reachable sites (snapped to roads) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
+    S.scoutRes = res; prog(`Checked ${res.sites.length} reachable sites (${$('#scRoad').value === 'walk' ? 'walk-in spots allowed' : 'all right at a road'}) with 3 models for ${night.noon.toLocaleDateString([], { weekday: 'long' })} night.`);
     listScout();
   } catch (e) { console.error(e); prog('Scouting failed: ' + e.message); }
 }
@@ -568,11 +569,11 @@ function listScout() {
     card.innerHTML = `<div class="top"><div><b>#${i + 1}</b> · ${U.km(s.dist)} ${dirName(bearing(r.home[0], r.home[1], s.p[0], s.p[1]))} · ${U.m(s.elev || 0)}</div><div style="color:${c};font-weight:800;font-size:18px">${s.score}</div></div>
       <div class="small">${s.driveTraffic != null ? `🚗 ${fmtDur(s.driveTraffic)}${s.drive && s.driveTraffic > s.drive * 1.05 ? ` <span class="muted">(${fmtDur(s.drive)} without traffic)</span>` : ''}` : 'No road route found'} · SQM ${s.sqm.toFixed(2)} (Bortle ${s.bortle}) · clouds ${(100 - s.clear * 100).toFixed(0)}% ±${s.spread.toFixed(0)}</div>
       <div class="grid2" style="grid-template-columns:repeat(3,1fr);gap:4px 10px;margin:6px 0 2px">${bars.map(([k, v]) => `<div class="small">${k}<div class="bar"><i style="width:${(v * 100).toFixed(0)}%;background:${colorFor(v)}"></i></div></div>`).join('')}</div>
-      ${s.hazards.length ? s.hazards.map(h => `<span class="tag bad">${h}</span>`).join('') : ''}${s.snowDepth > 0.01 ? `<span class="tag">Snow ${U.cm(s.snowDepth * 100)}</span>` : ''}${s.fog > 0.4 ? '<span class="tag ok">Fog possible</span>' : ''}${s.horizon == null ? '<span class="tag">Horizon not checked</span>' : s.horizonWorst > 8 ? `<span class="tag ok">Obstructed up to ${Math.round(s.horizonWorst)}° in places</span>` : s.horizon > 0.85 ? '<span class="tag good">Open horizon</span>' : ''}${s.hazards.length || s.snowDepth > 0.01 ? '' : ''}`;
+      ${s.hazards.length ? s.hazards.map(h => `<span class="tag bad">${h}</span>`).join('') : ''}${s.snowDepth > 0.01 ? `<span class="tag">Snow ${U.cm(s.snowDepth * 100)}</span>` : ''}${s.fog > 0.4 ? '<span class="tag ok">Fog possible</span>' : ''}${s.walk > 60 ? `<span class="tag ok">Park at the road, walk ${U.km(s.walk / 1000)}</span>` : '<span class="tag good">At the road</span>'}${s.horizon == null ? '<span class="tag">Horizon not checked</span>' : s.horizonWorst > 8 ? `<span class="tag ok">Obstructed up to ${Math.round(s.horizonWorst)}° in places</span>` : s.horizon > 0.85 ? '<span class="tag good">Open horizon</span>' : ''}${s.hazards.length || s.snowDepth > 0.01 ? '' : ''}`;
     const act = el('div', { class: 'row' });
     act.append(el('button', { class: 'btn', onclick: e => { e.stopPropagation(); open3D({ lat: s.p[0], lon: s.p[1], name: `Spot #${i + 1}` }); } }, '3D view'),
-      el('a', { class: 'btn', href: `https://maps.apple.com/?daddr=${s.p[0]},${s.p[1]}&dirflg=d`, target: '_blank' }, 'Apple Maps'),
-      el('a', { class: 'btn', href: `https://www.google.com/maps/dir/?api=1&destination=${s.p[0]},${s.p[1]}&travelmode=driving`, target: '_blank' }, 'Google Maps'));
+      el('a', { class: 'btn', href: `https://maps.apple.com/?daddr=${(s.parkAt || s.p)[0]},${(s.parkAt || s.p)[1]}&dirflg=d`, target: '_blank' }, 'Apple Maps'),
+      el('a', { class: 'btn', href: `https://www.google.com/maps/dir/?api=1&destination=${(s.parkAt || s.p)[0]},${(s.parkAt || s.p)[1]}&travelmode=driving`, target: '_blank' }, 'Google Maps'));
     card.append(act);
     card.onclick = () => selectSite(s, card);
     m.on('click', () => { selectSite(s, card); card.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); });

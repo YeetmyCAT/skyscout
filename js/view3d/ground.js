@@ -2,11 +2,13 @@
 // snow cover, wet ground, light pools from mapped lamps, procedural grass, and distant city lights from VIIRS.
 import * as THREE from '../../vendor/three.module.min.js';
 import { COMMON } from './glsl.js';
-import { heightField, imageryCanvas } from '../terrain.js';
+import { heightField, imageryCanvas, waterMaskCanvas } from '../terrain.js';
 import { curveDrop, hash } from '../util.js';
 
+function segD(x, z, a, b) { const dx = b[0] - a[0], dz = b[1] - a[1], l = dx * dx + dz * dz || 1; const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[1]) * dz) / l)); return Math.hypot(x - a[0] - t * dx, z - a[1] - t * dz); }
+function inPolyG(x, z, p) { let c = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { if (((p[i][1] > z) !== (p[j][1] > z)) && (x < (p[j][0] - p[i][0]) * (z - p[i][1]) / (p[j][1] - p[i][1]) + p[i][0])) c = !c; } return c; }
 export function terrainMaterial(U, albedo, opts = {}) {
-  const uni = { ...U, uAlb: { value: albedo }, uHasAlb: { value: albedo ? 1 : 0 }, uLightMap: U.uLightMap, uLightHalf: U.uLightHalf, uUseLM: { value: opts.lightmap ? 1 : 0 }, uBase: { value: new THREE.Color(opts.base || 0x4d5a3c) } };
+  const uni = { ...U, uWaterMask: { value: opts.water || null }, uHasWater: { value: opts.water ? 1 : 0 }, uAlb: { value: albedo }, uHasAlb: { value: albedo ? 1 : 0 }, uLightMap: U.uLightMap, uLightHalf: U.uLightHalf, uUseLM: { value: opts.lightmap ? 1 : 0 }, uBase: { value: new THREE.Color(opts.base || 0x4d5a3c) } };
   return new THREE.ShaderMaterial({
     uniforms: uni,
     vertexShader: '#include <common>\n' + /* glsl */`
@@ -17,7 +19,7 @@ export function terrainMaterial(U, albedo, opts = {}) {
       }`,
     fragmentShader: COMMON + /* glsl */`
       in vec2 vUv; in vec3 vN; in vec3 vW;
-      uniform sampler2D uAlb, uLightMap; uniform float uHasAlb, uUseLM, uLightHalf; uniform vec3 uBase;
+      uniform sampler2D uAlb, uLightMap, uWaterMask; uniform float uHasAlb, uUseLM, uLightHalf, uHasWater; uniform vec3 uBase;
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
@@ -29,6 +31,7 @@ export function terrainMaterial(U, albedo, opts = {}) {
         float forest = smoothstep(0.05, 0.02, lum) * green;
         // water in the aerial photo: dark, blue-leaning, and dead flat
         float water = smoothstep(0.0, 0.02, alb.b - alb.g*0.9 + 0.01) * smoothstep(0.09, 0.03, lum) * smoothstep(0.996, 0.9995, n.y);
+        if (uHasWater > 0.5) water = smoothstep(0.35, 0.65, texture(uWaterMask, vUv).r);   // mapped water (lakes, rivers, sea)
         // fine procedural variation so close ground is not a blurry photo
         float nz = fbm2(vW.xz*0.35) * 0.35 + fbm2(vW.xz*3.0)*0.15;
         alb *= 0.8 + nz;
@@ -92,20 +95,51 @@ export class Ground {
     progress('Loading aerial imagery…');
     const big = this.q.mobile ? 1536 : 2048;
     const [cn, cm, cf] = await Promise.all([imageryCanvas(local, this.nearHalf, 14, big).catch(() => null), imageryCanvas(local, this.midHalf, 10, big).catch(() => null), imageryCanvas(local, this.farHalf, 7, 1024).catch(() => null)]);
+    progress('Mapping lakes and rivers…');
+    const [wn, wm] = await Promise.all([waterMaskCanvas(local, this.nearHalf, 14, 1024), waterMaskCanvas(local, this.midHalf, 11, 1024)]);
+    if (wn) { const g = wn.getContext('2d', { willReadFrequently: true }); this.waterPx = g.getImageData(0, 0, wn.width, wn.height); }
     this.nearCanvas = cn;
+    const mask = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.minFilter = THREE.LinearFilter; t.generateMipmaps = false; return t; };
     const tex = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.anisotropy = 8; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; return t; };
     progress('Building terrain…');
     const n = this.q.mobile ? 160 : 256;
     const gn = gridMesh(n, this.nearHalf, H(hn), 0, 0, local);
     const gm = gridMesh(n, this.midHalf, H(hm), this.nearHalf * 0.97, 40, local);
     const gf = gridMesh(this.q.mobile ? 128 : 192, this.farHalf, H(hf), this.midHalf * 0.97, 120, local);
-    this.near = new THREE.Mesh(gn, terrainMaterial(this.U, tex(cn), { lightmap: true }));
-    this.mid = new THREE.Mesh(gm, terrainMaterial(this.U, tex(cm)));
+    this.near = new THREE.Mesh(gn, terrainMaterial(this.U, tex(cn), { lightmap: true, water: mask(wn) }));
+    this.mid = new THREE.Mesh(gm, terrainMaterial(this.U, tex(cm), { water: mask(wm) }));
     this.far = new THREE.Mesh(gf, terrainMaterial(this.U, tex(cf)));
     this.group.add(this.near, this.mid, this.far);
     // imagery pixels for grass colour/density
     if (cn) { const g = cn.getContext('2d', { willReadFrequently: true }); this.nearPx = g.getImageData(0, 0, cn.width, cn.height); }
     return this;
+  }
+  // Is (x, z) open water? Aerial photo colour (dark, blue-leaning) on dead-flat terrain, or inside mapped OSM water.
+  isWater(x, z) {
+    if (this.waterGrid) {
+      const cell = this.waterGrid.get(Math.floor(x / 50) + ',' + Math.floor(z / 50));
+      if (cell) for (const w of cell) {
+        if (w.line) { for (let i = 0; i < w.line.length - 1; i++) if (segD(x, z, w.line[i], w.line[i + 1]) < w.hw) return true; }
+        else if (inPolyG(x, z, w.p)) return true;
+      }
+    }
+    if (this.waterPx && Math.abs(x) < this.nearHalf && Math.abs(z) < this.nearHalf) {
+      const P = this.waterPx, i = Math.floor((x + this.nearHalf) / (2 * this.nearHalf) * P.width), j = Math.floor((z + this.nearHalf) / (2 * this.nearHalf) * P.height);
+      return P.data[(Math.min(P.height - 1, Math.max(0, j)) * P.width + Math.min(P.width - 1, Math.max(0, i))) * 4] > 128;
+    }
+    if (!this.nearPx || Math.abs(x) > this.nearHalf || Math.abs(z) > this.nearHalf) return false;
+    const [R, G, B] = this.imageryAt(x, z);
+    const lin = c => Math.pow(c / 255, 2.2) * 0.8;
+    const r = lin(R), g = lin(G), b = lin(B), lum = 0.3 * r + 0.59 * g + 0.11 * b;
+    if (!(b - g * 0.9 + 0.01 > 0 && lum < 0.09)) return false;
+    const h = this.heightAt, e = 6;
+    return Math.abs(h(x + e, z) - h(x - e, z)) + Math.abs(h(x, z + e) - h(x, z - e)) < 0.25;
+  }
+  setWater(polys, lines) {
+    const G = this.waterGrid = new Map(), C = 50;
+    const add = (o, xs, zs) => { const x0 = Math.min(...xs), x1 = Math.max(...xs), z0 = Math.min(...zs), z1 = Math.max(...zs); if (x1 - x0 > 60000 || z1 - z0 > 60000) return; for (let i = Math.floor(x0 / C); i <= Math.floor(x1 / C); i++) for (let j = Math.floor(z0 / C); j <= Math.floor(z1 / C); j++) { const k = i + ',' + j; let a = G.get(k); if (!a) G.set(k, a = []); a.push(o); } };
+    for (const p of polys) add({ p }, p.map(q => q[0]), p.map(q => q[1]));
+    for (const l of lines) add({ line: l.p, hw: l.hw }, l.p.map(q => q[0] - l.hw).concat(l.p.map(q => q[0] + l.hw)), l.p.map(q => q[1] - l.hw).concat(l.p.map(q => q[1] + l.hw)));
   }
   imageryAt(x, z) {
     const P = this.nearPx; if (!P) return [80, 100, 60];
@@ -194,6 +228,7 @@ export class Grass {
       const pave = sat < 14 && im[0] > 95; const water = im[2] > im[1] + 8 && im[2] > im[0] + 10;
       if (pave || water || hash(i * 3 + 9) > 0.35 + green / 25) continue;
       if (this.exclude && this.exclude(x, z)) continue;
+      if (this.ground.isWater(x, z)) continue;
       const y = this.ground.heightAt(x, z);
       off[n * 4] = x; off[n * 4 + 1] = y; off[n * 4 + 2] = z; off[n * 4 + 3] = hash(i * 17 + 3);
       // season: summer green to dormant tan
