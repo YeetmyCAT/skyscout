@@ -1,6 +1,6 @@
 // SkyScout: app controller — location, time, panels, map overlays, 3D view, scouting, sprites, offline.
-import { $, el, clamp, makeLocal, Net, fmtAgo, cachedJSON, haversine, bearing, destination, DEG, idbPrune } from './util.js';
-import { pointForecast, gridForecast, airQuality, val, cloudLayers, cloudTypeNames, fogRisk, precipState, MODEL_NAMES, WMO, profile, GRID_MODELS } from './weather.js';
+import { $, el, clamp, makeLocal, Net, fmtAgo, cachedJSON, haversine, bearing, destination, DEG, idbPrune, RateLimit } from './util.js';
+import { POINT_WEIGHT, pointForecast, gridForecast, airQuality, val, cloudLayers, cloudTypeNames, fogRisk, precipState, MODEL_NAMES, WMO, profile, GRID_MODELS } from './weather.js';
 import { loadIR, analyseIR, satLayer } from './satellite.js';
 import { atlasRatio, ratioToSqm } from './atlas.js';
 import { calibrateToAtlas, loadLights, skyBrightness, domeNames, bortle, BORTLE_TXT, nelm, lum2mag, NAT_SKY, loadRegionalLights, quickLP, QUICK } from './lightpol.js';
@@ -75,7 +75,7 @@ function setTime(d, from) {
 function updateOffline() {
   const b = $('#offline');
   if (!Net.online) { b.textContent = `You're offline — showing the last data saved ${Net.lastOnline ? fmtAgo(Net.lastOnline) : ''}`; b.classList.remove('hidden'); }
-  else if (S.data && S.data.point.stale) { b.textContent = `Couldn't reach the forecast servers — showing data from ${fmtAgo(S.data.point.fetched)}`; b.classList.remove('hidden'); }
+  else if (S.data && S.data.point.stale) { const w = RateLimit.waitMs(); b.textContent = w > 0 ? `Free weather service limit reached (resets in ${w > 3600e3 ? Math.round(w / 3600e3) + ' h' : Math.ceil(w / 60e3) + ' min'}) — showing the forecast saved ${fmtAgo(S.data.point.fetched)}` : `Couldn't reach the forecast servers — showing data from ${fmtAgo(S.data.point.fetched)}`; b.classList.remove('hidden'); }
   else b.classList.add('hidden');
 }
 
@@ -135,35 +135,69 @@ async function suggest(force) {
 
 // ---------------- location ----------------
 let selToken = 0;
+// Picking a place only shows it; the forecast is fetched when asked (saves the free service's quota).
 async function selectLocation(lat, lon, name, restoring) {
   const tok = ++selToken;
   S.sel = { lat, lon, name: name || `${lat.toFixed(3)}, ${lon.toFixed(3)}` };
-  map.select(lat, lon);
+  S.data = null;
+  map.select(lat, lon); save();
   if (!restoring && innerWidth <= 820) $('#panel').classList.remove('min');
   const box = $('#tab-cond');
-  box.innerHTML = `<div class="place">${S.sel.name}</div><div class="sub">Loading 7 weather models, satellite and light pollution…</div><div class="spin" style="margin:24px auto"></div>`;
+  box.innerHTML = `<div class="place">${S.sel.name}</div><div class="sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</div>
+    <button class="btn primary big" id="fetchBtn">Fetch forecast</button><div class="small muted" id="fetchNote"></div>`;
   document.querySelector('.tabs button[data-tab=cond]').click();
+  $('#fetchBtn').onclick = () => fetchForecast(tok);
+  updateFetchButton();
+  if (!name) reverseName(lat, lon).then(n => { if (n && tok === selToken) { S.sel.name = n; save(); const p = document.querySelector('#tab-cond .place'); if (p) p.textContent = n; $('#h3dName').textContent = n; } });
+  // a saved forecast for this spot loads instantly without using the service
+  try {
+    const [point, aq] = await Promise.all([pointForecast(lat, lon, { cacheOnly: true }), airQuality(lat, lon, { cacheOnly: true })]);
+    if (tok === selToken && point && !point.stale) await showForecast(tok, point, aq);
+  } catch { }
+}
+// Button text: forecasts left in the free quota, or a live countdown while the service is blocking us.
+let fetchTimer = null;
+function updateFetchButton() {
+  clearInterval(fetchTimer);
+  const tick = () => {
+    const b = $('#fetchBtn'); if (!b) { clearInterval(fetchTimer); return; }
+    const w = RateLimit.waitMs();
+    if (w > 0) {
+      const sec = Math.ceil(w / 1000), txt = sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      b.disabled = true; b.textContent = `Free weather service limit reached: try again in ${txt}`;
+    } else {
+      const left = Math.floor(RateLimit.remaining() / POINT_WEIGHT);
+      b.disabled = false; b.textContent = `Fetch forecast · about ${left} left before the free limit`;
+    }
+  };
+  tick(); fetchTimer = setInterval(tick, 1000);
+}
+async function fetchForecast(tok) {
+  const { lat, lon } = S.sel, note = $('#fetchNote');
+  $('#fetchBtn').disabled = true; $('#fetchBtn').textContent = 'Loading 7 weather models…';
   try {
     const [point, aq] = await Promise.all([pointForecast(lat, lon), airQuality(lat, lon)]);
     if (tok !== selToken) return;
-    S.data = { point, aq, lat, lon, lights: null, lp: null, domes: [] };
-    updateOffline();
-    if (!name) reverseName(lat, lon).then(n => { if (n && tok === selToken) { S.sel.name = n; save(); const p = document.querySelector('#tab-cond .place'); if (p) p.textContent = n; $('#h3dName').textContent = n; } });
-    save();
-    renderConditions();
-    // light pollution (heavier): VIIRS + whole-sky scattering model
-    const lights = await loadLights(lat, lon);
-    if (tok !== selToken) return;
-    S.data.lights = lights;
-    if (lights) {
-      await computeLP();
-      domeNames(lights, lat, lon).then(d => { if (tok === selToken) { S.data.domes = d; renderConditions(); } });
-    }
-    renderConditions();
+    await showForecast(tok, point, aq);
   } catch (e) {
     console.error(e);
-    box.innerHTML = `<div class="place">${S.sel.name}</div><div class="sub">Couldn't load the forecast (${e.message}). ${Net.online ? 'Try again in a moment.' : 'You are offline and nothing is saved for this place yet.'}</div>`;
+    if (note) note.textContent = e.rateLimited ? 'The free weather service is pausing requests from this device.' : `Couldn't load the forecast (${e.message}). ${Net.online ? 'Try again in a moment.' : 'You are offline and nothing is saved for this place yet.'}`;
+    updateFetchButton();
   }
+}
+async function showForecast(tok, point, aq) {
+  const { lat, lon } = S.sel;
+  S.data = { point, aq, lat, lon, lights: null, lp: null, domes: [] };
+  updateOffline();
+  renderConditions();
+  const lights = await loadLights(lat, lon);
+  if (tok !== selToken) return;
+  S.data.lights = lights;
+  if (lights) {
+    await computeLP();
+    domeNames(lights, lat, lon).then(d => { if (tok === selToken) { S.data.domes = d; renderConditions(); } });
+  }
+  renderConditions();
 }
 async function computeLP() {
   const d = S.data; if (!d || !d.lights) return;

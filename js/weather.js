@@ -49,13 +49,15 @@ function worstCode(col) {
   return sorted[sorted.length - 1];
 }
 
-export async function pointForecast(lat, lon) {
+export const POINT_WEIGHT = POINT_MODELS.length * Math.ceil(([...SURF, ...PL].length) / 10) + 1;
+export async function pointForecast(lat, lon, opts = {}) {
   const vars = [...SURF, ...PL];
   const key = `pt:${lat.toFixed(2)},${lon.toFixed(2)}`;
   const url = `${API}?latitude=${r4(lat)}&longitude=${r4(lon)}&hourly=${vars.join(',')}&models=${POINT_MODELS.join(',')}&forecast_days=4&past_days=1&timezone=auto&timeformat=unixtime`;
   let res;
-  try { res = await cachedJSON(key, url, 45 * 60e3); }
+  try { res = await cachedJSON(key, url, 45 * 60e3, opts); }
   catch (e) { // some regions reject a model: retry with the core three
+    if (e.rateLimited || opts.cacheOnly) throw e;
     const url2 = url.replace(POINT_MODELS.join(','), GRID_MODELS.join(','));
     res = await cachedJSON(key, url2, 45 * 60e3);
   }
@@ -80,9 +82,9 @@ export async function gridForecast(points, tag, opts = {}) {
 }
 
 export const AQ_API = 'https://air-quality-api.open-meteo.com/v1/air-quality';
-export async function airQuality(lat, lon) {
+export async function airQuality(lat, lon, opts = {}) {
   const url = `${AQ_API}?latitude=${r4(lat)}&longitude=${r4(lon)}&hourly=aerosol_optical_depth,dust,pm2_5&forecast_days=4&past_days=1&timeformat=unixtime`;
-  try { const r = await cachedJSON(`aq:${lat.toFixed(2)},${lon.toFixed(2)}`, url, 3 * 3600e3); const h = r.data.hourly; return { t: h.time, aod: h.aerosol_optical_depth, dust: h.dust, pm: h.pm2_5 }; }
+  try { const r = await cachedJSON(`aq:${lat.toFixed(2)},${lon.toFixed(2)}`, url, 3 * 3600e3, opts); const h = r.data.hourly; return { t: h.time, aod: h.aerosol_optical_depth, dust: h.dust, pm: h.pm2_5 }; }
   catch { return null; }
 }
 export async function airQualityGrid(points) {

@@ -181,12 +181,13 @@ export class FarStorms {
             float halo = exp(-pow(x/0.8, 2.0) - pow((p.y - 0.9)/0.05, 2.0));
             vec3 c = vec3(1.0, 0.1, 0.16)*cols + vec3(1.0, 0.3, 0.32)*halo*0.7;
             c = mix(c, vec3(0.45, 0.3, 1.0)*cols, smoothstep(0.5, 0.2, p.y)*0.6);
-            gl_FragColor = vec4(min(c * uI * 0.08 * uExposure, vec3(3.0e4)), 1.0);
+            // ~1 MR peak in the red is ~2e-2 cd/m^2, and a few-ms flash looks ~20x dimmer to the eye
+            gl_FragColor = vec4(min(c * uI * 2.5e-4 * uExposure, vec3(3.0e4)), 1.0);
           } else if (uKind < 1.5){
             // elve: a fast expanding red ring at ~90 km
             vec2 q = (p - 0.5)*2.0; q.y *= 6.0;
             float r = length(q), ring = exp(-pow((r - 0.6)/0.18, 2.0));
-            gl_FragColor = vec4(vec3(1.0, 0.15, 0.1) * ring * uI * 0.01 * uExposure, 1.0);
+            gl_FragColor = vec4(vec3(1.0, 0.15, 0.1) * ring * uI * 1.0e-4 * uExposure, 1.0);
           } else {
             // distant thunderstorm complex: towers (turrets) feeding a flat anvil sheared downwind; dark against the
             // sky, lit by sun or moon, and from inside by lightning

@@ -1,6 +1,8 @@
 // Immersive 360° view: assembles sky, clouds, terrain, structures and weather for one place and time.
 import * as THREE from '../../vendor/three.module.min.js';
-import { makeSkyLUT, makeSkyBackground, makeStars, makePlanets, makeMoon, milkyWayTexture, lpSkyTexture } from './sky.js';
+import { makeSkyLUT, makeSkyBackground, makeStars, makePlanets, makeMoon, milkyWayPhoto, makeFaintStars, lpSkyTexture } from './sky.js';
+import { SkyEvents } from './skyevents.js';
+import { loadKp, kpAt, auroraParams, MAG_POLE, ecef, enuBasis, magLat, loadSatellites } from '../space.js';
 import { loadNoise, makeCloudPass, weatherTextures, R_EFF } from './clouds.js';
 import { Ground, Grass, distantLights } from './ground.js';
 import { Structures } from './structures.js';
@@ -42,7 +44,9 @@ export class Immersive {
     };
     this.lut = makeSkyLUT(r, U); U.uSkyLUT.value = this.lut.rt.texture;
     this.main = new THREE.Scene(); this.fg = new THREE.Scene();
-    this.skyBg = makeSkyBackground(U, milkyWayTexture(assets.milkyway)); this.main.add(this.skyBg);
+    this.skyBg = makeSkyBackground(U, milkyWayPhoto()); this.main.add(this.skyBg);
+    this.events = new SkyEvents(U); this.main.add(this.events.group);
+    makeFaintStars(U).then(p => { this.faintStars = p; this.main.add(p); }).catch(() => { });
     this.stars = makeStars(U, assets.stars); this.main.add(this.stars);
     this.planets = makePlanets(U); this.main.add(this.planets);
     this.moon = makeMoon(U); this.main.add(this.moon);
@@ -69,6 +73,7 @@ export class Immersive {
     this.bright = fsPass(`in vec2 vUv; uniform sampler2D t; ${SAFE} void main(){ vec3 c = safeC(texture(t, vUv).rgb); vec3 b = max(c - 1.5, 0.0); gl_FragColor = vec4(b/(1.0 + dot(b, vec3(0.3))*0.02), 1.0); }`, { t: { value: null } });
     this.blur = fsPass(`in vec2 vUv; uniform sampler2D t; uniform vec2 d; void main(){ vec3 s = texture(t, vUv).rgb*0.227; for (int i = 1; i < 5; i++){ float w = float[5](0.227,0.194,0.121,0.054,0.016)[i]; s += (texture(t, vUv + d*float(i)).rgb + texture(t, vUv - d*float(i)).rgb)*w; } gl_FragColor = vec4(s, 1.0); }`, { t: { value: null }, d: { value: new THREE.Vector2() } });
     this.final = fsPass(`in vec2 vUv; uniform sampler2D t, tB1, tB2; uniform float uScot, uDither; ${SAFE}
+      uniform float uCam;
       vec3 tm(vec3 x){ return x*(1.0 + x/9.0)/(1.0 + x); }
       void main(){
         vec2 o1 = 0.6/vec2(textureSize(tB1, 0)), o2 = 0.6/vec2(textureSize(tB2, 0));
@@ -77,13 +82,14 @@ export class Immersive {
         vec3 c = safeC(texture(t, vUv).rgb) + safeC(b1)*0.06 + safeC(b2)*0.05;
         float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
         c = mix(c, vec3(L)*vec3(0.78, 0.92, 1.18), uScot);      // Purkinje shift / rod vision
+        c = max(mix(vec3(L), c, 1.0 + 0.45*uCam), 0.0);           // a camera records colour the eye can't see (airglow, aurora, sprites)
         c = tm(max(c, 0.0));
         c = pow(c, vec3(1.0/2.2));
         // triangular dither: two decorrelated noise values hide 8-bit steps in dark gradients
         float n1 = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
         float n2 = fract(52.9829189*fract(dot(gl_FragCoord.xy + vec2(17.3, 41.7), vec2(0.00583715, 0.06711056))));
         gl_FragColor = vec4(c + (n1 + n2 - 1.0)/255.0*uDither, 1.0);
-      }`, { t: { value: null }, tB1: { value: null }, tB2: { value: null }, uScot: { value: 0 }, uDither: { value: 2.0 } });
+      }`, { t: { value: null }, tB1: { value: null }, tB2: { value: null }, uScot: { value: 0 }, uDither: { value: 2.0 }, uCam: { value: 0 } });
     this.adaptL = 1; this.ev = 0; this.cameraMode = false; this.running = false; this.clock = new THREE.Clock();
     this.bindControls();
     addEventListener('resize', () => this.resize());
@@ -135,6 +141,13 @@ export class Immersive {
       this.U.uFlux.value = t; this.U.uFluxHalf.value = 60000;
     } else { const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1); t.needsUpdate = true; this.U.uFlux.value = t; }
     this.setLP(ctx.lp);
+    // Earth-fixed frame for the aurora shell intersections
+    const B = enuBasis(ctx.lat, ctx.lon), o = ecef(ctx.lat, ctx.lon, (ctx.groundZ || 0) / 1000), mp = ecef(MAG_POLE.lat, MAG_POLE.lon, -6370);
+    this.U.uENU.value.set(B.e[0], B.n[0], B.u[0], B.e[1], B.n[1], B.u[1], B.e[2], B.n[2], B.u[2]);
+    this.U.uObsECEF.value.set(...o); this.U.uMagAxis.value.set(...mp).normalize();
+    this.magLat = Math.abs(magLat(ctx.lat, ctx.lon));
+    loadKp().then(k => { this.kp = k; this.applyAurora(); });
+    loadSatellites().then(sv => this.events.setSatellites(sv));
     this.camera.position.set(0, this.ground.heightAt(0, 0) + this.eye, 0);
     this.lastWxKey = null;
     this.setTime(ctx.time || new Date(), true);
@@ -214,8 +227,18 @@ export class Immersive {
     U.uObsKm.value = 0.0 + Math.max(0, groundZ) / 1000 * 0;
     this.applyWeather(force);
     this.applyTimeDependent();
+    this.applyAurora(); this.dateSetAt = performance.now();
     if (this.farStorms.forecast) this.farStorms.atTime(this.unix);
     this.updateLabels();
+  }
+  // Auroral oval from the planetary Kp index at this time (observed, or NOAA's 3-day forecast).
+  applyAurora() {
+    const kp = kpAt(this.kp, this.date ? this.date.getTime() : Date.now());
+    this.kpNow = kp;
+    const P = auroraParams(kp ?? 2);
+    // skip the shader work when the oval is far below this observer's horizon
+    const on = this.magLat > P.edge - 24;
+    this.U.uAurora.value.set(P.edge * DEG, P.width * DEG, on ? P.kR : 0, P.red);
   }
   applyTimeDependent() {
     const U = this.U, sunAlt = this.sm.sun.alt;
@@ -396,6 +419,7 @@ export class Immersive {
       consider(this.assets.stars.n[i / 4] || `Star (mag ${sd[i + 2].toFixed(1)})`, x, y, z, sd[i + 2], { kind: 'star', bv: sd[i + 3] });
     }
     for (const p of this.pl) { const q = altAzToVec(p.alt, p.az); bd = Math.min(bd + 0.6, 4); consider(p.name, ...q, p.mag, { kind: 'planet' }); }
+    for (const st of this.events.visibleSats || []) { const q = altAzToVec(st.alt, st.az); consider(`${st.name} (satellite, sunlit, ${Math.round(st.range)} km away)`, ...q, st.mag, { kind: 'satellite' }); }
     const mv = this.U.uMoonDir.value; consider(`Moon — ${phaseName(this.sm.phase)}, ${(this.sm.moonFrac * 100).toFixed(0)}% lit`, mv.x, mv.y, mv.z, this.sm.moonMag, { kind: 'moon' });
     const sv = this.U.uSunDir.value; consider('Sun', sv.x, sv.y, sv.z, -26.7, { kind: 'sun' });
     // sky brightness in that direction
@@ -451,9 +475,17 @@ export class Immersive {
     if (this.cameraMode && night) E *= 10;
     U.uExposure.value = E;
     this.final.mat.uniforms.uScot.value = this.cameraMode ? 0 : smooth(0.004, 0.0002, this.adaptL) * 0.6;
+    this.final.mat.uniforms.uCam.value = this.cameraMode && night ? 1 : 0;
     // pixel solid angle for point sources
     const pxRad = (cam.fov * DEG) / (this.el.clientHeight * this.q.dpr);
     U.uPxSr.value = pxRad * pxRad; U.uPxScale.value = this.q.dpr;
+    U.uZoomGain.value = clamp(2.2 * Math.log10(70 / cam.fov), 0, 2.5);   // zooming in acts like binoculars
+    {
+      const sqm = lum2mag(Math.max(this.adaptL, 1e-5)), lim = 7.93 - 5 * Math.log10(Math.pow(10, 4.316 - sqm / 5) + 1);
+      const simDate = new Date(this.date.getTime() + (performance.now() - (this.dateSetAt || performance.now())));   // satellites keep moving in real time
+      const m = this.U.uEqToWorld.value.elements, rm = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
+      this.events.update(now, simDate, this.ctx, rm, lim, this.sm.sun.alt);
+    }
     U.uInvProjView.value.copy(cam.projectionMatrixInverse).premultiply(cam.matrixWorld);
     U.uCamPos.value.copy(cam.position); U.uCamFwd.value.set(0, 0, -1).applyQuaternion(cam.quaternion);
     U.uFrame.value++;
@@ -530,6 +562,7 @@ export class Immersive {
   updateLabels() {
     const d = [];
     for (const p of this.pl || []) if (p.alt > -1) d.push({ t: p.name, alt: p.alt + 0.8, az: p.az, cls: 'planet' });
+    if (this.kpNow != null && this.U.uAurora.value.z > 0 && this.sm.sun.alt < -10) d.push({ t: `Aurora oval (Kp ${this.kpNow.toFixed(1)})`, alt: 8, az: (this.ctx.lat >= 0 ? 0 : 180), cls: 'dome', always: false });
     if (this.sm.moon.alt > -1) d.push({ t: 'Moon', alt: this.sm.moon.alt + 1.2, az: this.sm.moon.az, cls: 'planet' });
     if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
     for (const dm of this.ctx.domes || []) d.push({ t: `${dm.name || 'Light dome'} glow`, alt: 3 + dm.strength * 4, az: dm.az, cls: 'dome', dome: true });

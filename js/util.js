@@ -89,18 +89,62 @@ async function fetchT(url, opts = {}, ms = 25000) {
   try { const r = await fetch(url, { ...opts, signal: ac.signal }); return r; } finally { clearTimeout(t); }
 }
 
+// ---------- Open-Meteo free-tier budget (600 calls/min, 5000/h, 10000/day; big requests count as several) ----------
+export const RateLimit = {
+  limits: [[60e3, 600], [3600e3, 5000], [864e5, 10000]],
+  load() { try { this.log = JSON.parse(localStorage.getItem('ss_om_use') || '[]'); this.until = +localStorage.getItem('ss_om_until') || 0; } catch { this.log = []; this.until = 0; } },
+  save() { try { const t = Date.now(); this.log = this.log.filter(e => t - e[0] < 864e5); localStorage.setItem('ss_om_use', JSON.stringify(this.log)); localStorage.setItem('ss_om_until', String(this.until)); } catch { } },
+  // weight of one request, as the service counts it
+  weight(url) {
+    try {
+      const u = new URL(url), q = u.searchParams, locs = (q.get('latitude') || '').split(',').length;
+      const vars = Math.max(1, Math.ceil((q.get('hourly') || '').split(',').filter(Boolean).length / 10));
+      const models = Math.max(1, (q.get('models') || '').split(',').filter(Boolean).length);
+      const days = Math.max(1, Math.ceil(((+q.get('forecast_days') || 7) + (+q.get('past_days') || 0)) / 14));
+      return locs * vars * models * days;
+    } catch { return 1; }
+  },
+  record(url) { this.log.push([Date.now(), this.weight(url)]); this.save(); },
+  // what's left in the hourly and daily windows (the minute window refills within a minute)
+  remaining(includeMinute = false) {
+    const t = Date.now(); let r = Infinity;
+    for (const [win, cap] of this.limits) { if (win < 3600e3 && !includeMinute) continue; r = Math.min(r, cap - this.log.filter(e => t - e[0] < win).reduce((a, e) => a + e[1], 0)); }
+    return Math.max(0, r);
+  },
+  // the service said no: block until its window resets
+  blocked(reason) {
+    const t = Date.now(), d = new Date(t);
+    if (/daily/i.test(reason)) this.until = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    else if (/hourly/i.test(reason)) this.until = Math.ceil(t / 3600e3) * 3600e3;
+    else this.until = Math.ceil(t / 60e3) * 60e3 + 1000;
+    this.save();
+  },
+  waitMs() { return Math.max(0, this.until - Date.now()); },
+};
+RateLimit.load();
+const isOpenMeteo = url => /open-meteo[.]com/.test(url);
+
 // JSON with cache: fresh copy within ttl, else network, else stale copy (offline mode).
 export async function cachedJSON(key, url, ttlMs, opts = {}) {
   const hit = await idbGet('json', key);
   if (hit && Date.now() - hit.t < ttlMs) return { data: hit.data, t: hit.t, stale: false };
+  if (opts.cacheOnly) { if (hit) return { data: hit.data, t: hit.t, stale: true }; throw new Error('not saved'); }
+  const om = isOpenMeteo(url);
+  if (om && RateLimit.waitMs() > 0) { if (hit) return { data: hit.data, t: hit.t, stale: true }; const e = new Error('rate-limited'); e.rateLimited = true; throw e; }
   try {
     let r;
     for (let attempt = 0; ; attempt++) {
       r = await fetchT(url, opts.fetch || {}, opts.timeout || 30000);
+      if (om && r.status === 429) break;                      // don't hammer it: report the wait instead
       if ((r.status === 429 || r.status === 503 || r.status === 504) && attempt < 3) { await sleep(4000 * (attempt + 1) ** 2); continue; }
       break;
     }
-    if (r.status === 429) throw new Error('the free forecast service is rate-limiting requests, try again in a minute');
+    if (om) RateLimit.record(url);
+    if (r.status === 429) {
+      let reason = ''; try { reason = (await r.json()).reason || ''; } catch { }
+      if (om) RateLimit.blocked(reason);
+      const e = new Error(om ? 'rate-limited' : 'the service is rate-limiting requests'); e.rateLimited = om; throw e;
+    }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     if (data && data.error) throw new Error(data.reason || 'API error');

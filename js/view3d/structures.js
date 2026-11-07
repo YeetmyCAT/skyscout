@@ -47,6 +47,7 @@ function buildingMaterial(U) {
       uniform float uLitFrac;
       #include <logdepthbuf_pars_fragment>
       vec3 pal(float s, float kind){
+        if (kind > 2.5) return mix(vec3(0.42,0.07,0.05), vec3(0.30,0.11,0.07), s);       // barn red, weathered
         if (kind > 1.5) return mix(vec3(0.55,0.55,0.52), vec3(0.42,0.45,0.48), s);       // industrial metal
         if (kind > 0.5) return mix(vec3(0.62,0.58,0.52), vec3(0.45,0.38,0.33), s);       // commercial: concrete / brick
         vec3 a[6] = vec3[6](vec3(0.86,0.85,0.80), vec3(0.78,0.72,0.60), vec3(0.62,0.64,0.62), vec3(0.55,0.62,0.70), vec3(0.55,0.30,0.24), vec3(0.72,0.68,0.58));
@@ -55,7 +56,7 @@ function buildingMaterial(U) {
       void main(){
         #include <logdepthbuf_fragment>
         vec3 n = normalize(vN); if (!gl_FrontFacing) n = -n;
-        float seed = vInfo.x, kind = vInfo.y, roof = vInfo.z;
+        float seed = floor(vInfo.x*4096.0 + 0.5)/4096.0, kind = floor(vInfo.y + 0.5), roof = vInfo.z;   // quantise: interpolation noise must not flip per-pixel hashes
         vec3 alb; vec3 emit = vec3(0.0);
         if (roof > 0.5){
           vec3 shingle = mix(vec3(0.16,0.16,0.17), vec3(0.28,0.20,0.15), fract(seed*7.3));
@@ -73,7 +74,7 @@ function buildingMaterial(U) {
           float fl = floor(v/fh), col = floor(u/fw);
           vec2 c = vec2(fract(u/fw), fract(v/fh));
           float ww = kind > 1.5 ? 0.0 : (kind > 0.5 ? 0.42 : 0.22), wh = kind > 0.5 ? 0.30 : 0.28;
-          float win = step(abs(c.x - 0.5), ww) * step(abs(c.y - 0.55), wh) * step(fl, vInfo.w - 1.0) * step(0.0, v - 0.5);
+          float win = step(abs(c.x - 0.5), ww) * step(abs(c.y - 0.55), wh) * step(fl, vInfo.w - 0.5) * step(0.0, v - 0.5);   // floors is an integer passed as a float: compare with margin
           if (kind < 0.5) win *= step(0.3, hash12(vec2(col, fl) + seed*17.0));
           if (win > 0.5){
             float r = hash12(vec2(col*1.7 + seed*31.0, fl*3.1));
@@ -355,6 +356,9 @@ export class Structures {
     }
     const nearBuilding = (x, z, r) => { for (let i = Math.floor((x - r) / C); i <= Math.floor((x + r) / C); i++) for (let j = Math.floor((z - r) / C); j <= Math.floor((z + r) / C); j++) for (const o of grid.get(key(i, j)) || []) { if (x > o.x0 - r && x < o.x1 + r && z > o.z0 - r && z < o.z1 + r) return true; } return false; };
     const placed = [];
+    const ag = new Map(); for (const a of addrs) { const [ax, ay] = this.local.toXY(a.p[0], a.p[1]); const k = Math.floor(ax / 100) + ',' + Math.floor(-ay / 100); ag.set(k, (ag.get(k) || 0) + 1); }
+    const density = (x, z) => { let n = 0; for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) n += ag.get((Math.floor(x / 100) + i) + ',' + (Math.floor(z / 100) + j)) || 0; return n; };   // addresses in ~300 m square
+    let seq = 0;
     for (const a of addrs) {
       const [x0, y0] = this.local.toXY(a.p[0], a.p[1]); let x = x0, z = -y0;
       if (Math.abs(x) > half || Math.abs(z) > half) continue;
@@ -370,21 +374,41 @@ export class Structures {
         if (d < bd) { bd = d; best = { px, pz, dx, dz, hw: r.hw }; }
       }
       const big = a.shop || /commercial|retail|office|industrial|warehouse|apartments/.test(a.building || '');
-      const W = big ? 18 : 11, D = big ? 16 : 9;           // frontage and depth, metres
+      const rural = !big && density(x, z) < 6 && (this.ctx.urbanAt ? this.ctx.urbanAt(x, z) : 0) < 0.35;
+      const r1 = hash(++seq * 7919 + 13), r2 = hash(seq * 104729 + 7);
+      // house type: rural farmhouse / country ranch / manufactured home; suburban ranch / colonial / split-level / cape
+      const style = big ? 'shop' : rural ? (r1 < 0.45 ? 'farmhouse' : r1 < 0.8 ? 'country' : 'manufactured') : (r1 < 0.35 ? 'ranch' : r1 < 0.65 ? 'colonial' : r1 < 0.85 ? 'split' : 'cape');
+      const dims = { shop: [18, 16, 1], farmhouse: [12, 9, 2], country: [18, 10, 1], manufactured: [21, 5, 1], ranch: [16, 10, 1], colonial: [11, 9, 2], split: [13, 9, 2], cape: [10, 8, 2] }[style];
+      const W = dims[0] * (0.9 + r2 * 0.2), D = dims[1] * (0.9 + hash(seq * 31) * 0.2);   // frontage and depth, metres
       let fx = 1, fz = 0;                                 // unit vector along the street
       if (best) {
         const l = Math.hypot(best.dx, best.dz) || 1; fx = best.dx / l; fz = best.dz / l;
         // push the house back so its front sits a typical setback from the road edge
         let nx = x - best.px, nz = z - best.pz, nl = Math.hypot(nx, nz);
         if (nl < 0.5) { nx = -fz; nz = fx; nl = 1; }
-        const want = best.hw + (big ? 6 : 8) + D / 2;
+        const want = best.hw + (big ? 6 : rural ? 18 + r2 * 22 : 7 + r2 * 4) + D / 2;   // country houses sit much further back
         if (nl < want) { x = best.px + nx / nl * want; z = best.pz + nz / nl * want; }
       }
       if (nearBuilding(x, z, 3) || this.ground.isWater(x, z) || this.onPavement(x, z, 1)) continue;
-      const bx = -fz, bz = fx, c = [[-W / 2, -D / 2], [W / 2, -D / 2], [W / 2, D / 2], [-W / 2, D / 2]];
-      const ring = c.map(([u, v]) => { const px = x + fx * u + bx * v, pz = z + fz * u + bz * v; return this.local.toLL(px, -pz); });
+      const bx = -fz, bz = fx;
+      // away from the road: the side of the house opposite the street
+      let ax = x - (best ? best.px : x - bx), az = z - (best ? best.pz : z - bz); const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
+      const rect = (u0, v0, w, d) => [[u0 - w / 2, v0 - d / 2], [u0 + w / 2, v0 - d / 2], [u0 + w / 2, v0 + d / 2], [u0 - w / 2, v0 + d / 2]]
+        .map(([u, v]) => { const px = x + fx * u + ax * v, pz = z + fz * u + az * v; return this.local.toLL(px, -pz); });
+      const add = (ring, type, levels, roofShape, h) => out.push({ ring, type, levels, roofShape, h: h || null, estimated: true });
       placed.push([x, z]);
-      out.push({ ring, type: big ? (a.building || 'commercial') : (a.building && a.building !== 'yes' ? a.building : 'house'), levels: a.levels || (big ? 1 : 2), h: a.h, estimated: true });
+      const lv = a.levels || dims[2];
+      if (style === 'shop') { add(rect(0, 0, W, D), a.building || 'commercial', a.levels || 1, 'flat', a.h); continue; }
+      add(rect(0, 0, W, D), 'house', lv, style === 'ranch' || style === 'country' ? 'hipped' : 'gabled', a.h || (style === 'cape' ? 3.6 : style === 'split' ? 5.0 : null));
+      const side = r2 < 0.5 ? -1 : 1;
+      // garages: attached wing on suburban ranches and splits, detached behind colonials and country houses
+      if ((style === 'ranch' || style === 'split') && hash(seq * 17) < 0.8) add(rect(side * (W / 2 + 3.6), -0.5, 7, 7.5), 'garage', 1, 'gabled');
+      if ((style === 'colonial' || style === 'country') && hash(seq * 19) < 0.6) add(rect(side * (W / 2 + 6), D / 2 + 6, 7, 7), 'garage', 1, 'gabled');
+      // farmsteads: a red barn and a machine shed behind the house
+      if (style === 'farmhouse') {
+        add(rect(side * 14, D / 2 + 30 + r2 * 15, 22, 14), 'barn', 2, 'gabled', 10.5);
+        if (hash(seq * 23) < 0.7) add(rect(-side * 12, D / 2 + 40 + r2 * 10, 26, 16), 'farm_auxiliary', 1, 'gabled', 6.5);
+      }
     }
     return out;
   }
@@ -405,6 +429,17 @@ export class Structures {
       out.push(b);
     }
     return out;
+  }
+  // Is a tree crown of radius r at (x, z) going to poke into a building?
+  nearBuilding(x, z, r) {
+    if (!this.colGrid) this.buildColliderGrid();
+    for (let i = Math.floor((x - r) / 25); i <= Math.floor((x + r) / 25); i++) for (let j = Math.floor((z - r) / 25); j <= Math.floor((z + r) / 25); j++)
+      for (const o of this.colGrid.get(i + ',' + j) || []) {
+        if (!o.p || x < o.x0 - r || x > o.x1 + r || z < o.z0 - r || z > o.z1 + r) continue;
+        if (pointInPoly(x, z, o.p)) return true;
+        for (let a = 0, b = o.p.length - 1; a < o.p.length; b = a++) if (segDist(x, z, o.p[b], o.p[a]) < r) return true;
+      }
+    return false;
   }
   // Within r metres of a road, path, rail or paved area?
   onPavement(x, z, r = 0) {
@@ -449,7 +484,7 @@ export class Structures {
       { let cx = 0, cz = 0; p.forEach(q => { cx += q[0]; cz += q[1]; }); cx /= p.length; cz /= p.length; p = p.map(([x, z]) => { const dx = x - cx, dz = z - cz, l = Math.hypot(dx, dz) || 1; return [x - dx / l * 0.15, z - dz / l * 0.15]; }); }
       id++; const seed = hash(id * 7919);
       const t = b.type;
-      const kind = /^(industrial|warehouse|factory|manufacture|hangar|barn|farm_auxiliary|storage_tank|silo)$/.test(t) ? 2 : /^(commercial|retail|office|school|hospital|church|university|public|civic|hotel|supermarket|apartments|government)$/.test(t) ? 1 : 0;
+      const kind = /^(barn|cowshed|stable)$/.test(t) ? 3 : /^(industrial|warehouse|factory|manufacture|hangar|farm_auxiliary|storage_tank|silo)$/.test(t) ? 2 : /^(commercial|retail|office|school|hospital|church|university|public|civic|hotel|supermarket|apartments|government)$/.test(t) ? 1 : 0;
       const small = /^(garage|garages|shed|carport|hut|cabin|kiosk)$/.test(t);
       let levels = b.levels || (small ? 1 : kind === 2 ? 2 : kind === 1 ? (t === 'apartments' ? 4 : a > 1500 ? 2 : 1) : (a < 60 ? 1 : 2));
       let eave = b.h ? b.h * (kind === 0 && !b.roofShape ? 0.78 : 1) : levels * (kind === 1 ? 3.6 : kind === 2 ? 4.5 : 2.9) + 0.3;
@@ -463,7 +498,8 @@ export class Structures {
       // roof
       const rinf = [seed, kind, 1, floors];
       const pitched = (b.roofShape && b.roofShape !== 'flat') || (kind === 0 && a < 450 && !b.roofShape);
-      const ridgeH = Math.min(5, Math.sqrt(a) * 0.28 + 1);
+      const steep = b.estimated && b.type === 'house' && b.levels >= 2 && b.h && b.h < 7;   // cape cod: tall roof over a short wall
+      const ridgeH = steep ? 4.2 : kind === 3 ? 5.5 : Math.min(5, Math.sqrt(a) * 0.28 + 1);
       if (pitched && p.length === 4) {
         // gable along the long axis
         const d01 = Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]), d12 = Math.hypot(p[2][0] - p[1][0], p[2][1] - p[1][1]);
@@ -471,7 +507,7 @@ export class Structures {
         const P = i => p[(i + s) % 4];
         const m1 = [(P(1)[0] + P(2)[0]) / 2, (P(1)[1] + P(2)[1]) / 2], m2 = [(P(3)[0] + P(0)[0]) / 2, (P(3)[1] + P(0)[1]) / 2];
         const R1 = [m1[0], top + ridgeH, m1[1]], R2 = [m2[0], top + ridgeH, m2[1]], V = i => [P(i)[0], top, P(i)[1]];
-        const hip = b.roofShape === 'hipped' || hash(id * 3) < 0.25;
+        const hip = b.roofShape === 'hipped' || (b.roofShape !== 'gabled' && hash(id * 3) < 0.25);
         if (hip) { const k = 0.22; const r1 = [R1[0] + (R2[0] - R1[0]) * k, R1[1], R1[2] + (R2[2] - R1[2]) * k], r2 = [R2[0] + (R1[0] - R2[0]) * k, R2[1], R2[2] + (R1[2] - R2[2]) * k]; tri(V(0), V(1), r1, rinf); tri(V(0), r1, r2, rinf); tri(V(2), V(3), r2, rinf); tri(V(2), r2, r1, rinf); tri(V(1), V(2), r1, rinf); tri(V(3), V(0), r2, rinf); }
         else {
           tri(V(0), V(1), R1, rinf); tri(V(0), R1, R2, rinf); tri(V(2), V(3), R2, rinf); tri(V(2), R2, R1, rinf);
@@ -530,7 +566,7 @@ export class Structures {
         if (trees.length > max) break;
         const jx = x + (hash(seed++) - 0.5) * sp, jz = z + (hash(seed++) - 0.5) * sp;
         if (!pointInPoly(jx, jz, p)) continue;
-        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1)) continue;
+        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1) || this.nearBuilding(jx, jz, 4.5)) continue;
         trees.push({ x: jx, z: jz, kind: f.leaf === 'needleleaved' ? 1 : f.leaf === 'broadleaved' ? 0 : -1 });
       }
     }
@@ -541,13 +577,13 @@ export class Structures {
         if (trees.length > max) break;
         const jx = x + (hash(seed++) - 0.5) * sp, jz = z + (hash(seed++) - 0.5) * sp;
         const tm = this.ground.maskAt(this.ground.treeMask, jx, jz);
-        if (tm === true) { if (hash(seed++) < 0.55 && !this.ground.isWater(jx, jz) && !this.onPavement(jx, jz, 1.5) && !(this.buildingPolys && this.buildingPolys.some(bp => bp.length > 2 && Math.abs(bp[0][0] - jx) < 40 && Math.abs(bp[0][1] - jz) < 40 && pointInPoly(jx, jz, bp)))) trees.push({ x: jx, z: jz, kind: -1, est: true }); continue; }
+        if (tm === true) { if (hash(seed++) < 0.55 && !this.ground.isWater(jx, jz) && !this.onPavement(jx, jz, 1.5) && !this.nearBuilding(jx, jz, 4) && !(this.buildingPolys && this.buildingPolys.some(bp => bp.length > 2 && Math.abs(bp[0][0] - jx) < 40 && Math.abs(bp[0][1] - jz) < 40 && pointInPoly(jx, jz, bp)))) trees.push({ x: jx, z: jz, kind: -1, est: true }); continue; }
         if (tm === false && this.ground.treeMask) continue;          // land cover says no trees here
         const [R, G, B] = this.ground.imageryAt(jx, jz);
         const lum = 0.3 * R + 0.59 * G + 0.11 * B, green = G - Math.max(R, B);
         const treeLike = (lum < 70 && green > 2) || (lum < 55 && Math.abs(R - G) < 12 && B < G); // canopy or bare canopy shadow
         if (!treeLike || hash(seed++) > 0.45) continue;
-        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1.5)) continue;
+        if (this.ground.isWater(jx, jz) || this.onPavement(jx, jz, 1.5) || this.nearBuilding(jx, jz, 4)) continue;
         if (this.buildingPolys && this.buildingPolys.some(bp => bp.length > 2 && Math.abs(bp[0][0] - jx) < 40 && Math.abs(bp[0][1] - jz) < 40 && pointInPoly(jx, jz, bp))) continue;
         trees.push({ x: jx, z: jz, kind: -1, est: true });
       }

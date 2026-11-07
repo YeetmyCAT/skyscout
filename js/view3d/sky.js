@@ -16,7 +16,7 @@ export function makeSkyLUT(renderer, U) {
       #define PI 3.14159265
       in vec2 vUv;
       uniform vec3 uSunDir, uMoonDir, uSunE, uMoonE;
-      uniform float uAOD, uObsKm, uExposure, uNatSky, uLPScale;
+      uniform float uAOD, uObsKm, uExposure, uNatSky, uLPScale, uTime;
       uniform sampler2D uLPSky; uniform float uHasLP;
       uniform mat3 uEclip; // world -> ecliptic frame (for zodiacal light)
       const float Rg = 6360.0, Rt = 6460.0;
@@ -76,13 +76,19 @@ export function makeSkyLUT(renderer, U) {
         float vr = 1.0/sqrt(1.0 - 0.96*cos(hp)*cos(hp));
         float X = 1.0/(sin(hp) + 0.025*exp(-11.0*sin(hp)));
         float extn = exp(-0.25*min(X, 30.0));
-        vec3 airglow = vec3(0.85, 1.0, 0.8) * uNatSky * 0.55 * vr * extn;
-        vec3 ecl = uEclip * rd; float beta = asin(clamp(ecl.z,-1.0,1.0));
-        float elong = acos(clamp(dot(rd, uSunDir), -1.0, 1.0));
-        float zod = (0.25 + 2.2*exp(-(elong - 0.5)/0.35)) * exp(-abs(beta)/0.28) + 0.1;
-        float sunDown = smoothstep(-0.12, -0.3, uSunDir.y);
-        vec3 zodiacal = vec3(1.0, 0.97, 0.9) * uNatSky * 0.3 * zod * sunDown * extn;
-        vec3 diffuse = vec3(0.9, 0.95, 1.0) * uNatSky * 0.22 * extn;
+        // Airglow: green 557.7 nm layer (~95 km) with slow gravity-wave banding, a weak red 630 nm layer above it.
+        float azr = atan(rd.x, -rd.z);
+        float waves = 0.75 + 0.5*(sin(azr*7.0 + hp*30.0 + uTime*0.01)*0.5 + 0.5) * smoothstep(0.0, 0.25, hp + 0.05);
+        float vrR = 1.0/sqrt(1.0 - 0.93*cos(hp)*cos(hp));
+        vec3 airglow = (vec3(0.55, 1.0, 0.5) * 0.36 * vr * waves + vec3(1.0, 0.25, 0.2) * 0.07 * vrR) * uNatSky * extn;
+        // Zodiacal light from the dust in the ecliptic: brightness in S10 units fitted to Leinert et al. (1998),
+        // falling away from the Sun and from the ecliptic, with the gegenschein opposite the Sun.
+        vec3 ecl = uEclip * rd; float beta = abs(asin(clamp(ecl.z,-1.0,1.0)))*57.2958;
+        float elong = max(acos(clamp(dot(rd, uSunDir), -1.0, 1.0))*57.2958, 12.0);
+        float s0 = elong < 90.0 ? 430.0*pow(90.0/elong, 1.9) : 200.0 + 230.0*exp(-(elong - 90.0)/25.0) + 60.0*exp(-pow((180.0 - elong)/10.0, 2.0));
+        float S10 = 60.0 + (s0 - 60.0)*exp(-beta/(12.0 + 0.15*elong));
+        vec3 zodiacal = vec3(1.0, 0.96, 0.88) * uNatSky * S10/300.0 * extn;
+        vec3 diffuse = vec3(0.9, 0.95, 1.0) * uNatSky * 0.15 * extn;
         vec3 nat = (airglow + zodiacal + diffuse);
         vec3 lp = lpSky(rd) * uLPScale * vec3(1.0, 0.86, 0.68);
         vec3 col = L + nat + lp;
@@ -123,13 +129,14 @@ export function lpSkyTexture(lp) {
 
 // Background: sky LUT + sun disc + Milky Way. Drawn first, at the far plane.
 export function makeSkyBackground(U, mwTex) {
-  Object.assign(U, { uMW: { value: mwTex }, uEqToWorld: { value: new THREE.Matrix3() }, uGal: { value: new THREE.Matrix3() }, uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() }, uMWScale: { value: 1 } });
+  Object.assign(U, { uMW: { value: mwTex }, uEqToWorld: { value: new THREE.Matrix3() }, uGal: { value: new THREE.Matrix3() }, uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() }, uMWScale: { value: 1 },
+    uAurora: { value: new THREE.Vector4() }, uENU: { value: new THREE.Matrix3() }, uObsECEF: { value: new THREE.Vector3(0, 0, 6371) }, uMagAxis: { value: new THREE.Vector3(0, 0, 1) } });
   const mat = new THREE.ShaderMaterial({
     uniforms: U, depthTest: false, depthWrite: false,
     vertexShader: `out vec3 vDir; uniform mat4 uInvProjView; uniform vec3 uCamPos;
       void main(){ vec4 w = uInvProjView * vec4(position.xy, 1.0, 1.0); vDir = w.xyz/w.w - uCamPos; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal; uniform float uMWScale;
+      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform vec3 uObsECEF, uMagAxis;
       void main(){
         vec3 d = normalize(vDir);
         vec3 col = skyL(d);
@@ -142,19 +149,42 @@ export function makeSkyBackground(U, mwTex) {
           float limb = r < R ? (0.4 + 0.6*mu) : 0.0;
           col += uSunE * 2.15e4 * limb * directT(uSunDir.y) * uExposure * smoothstep(-0.02, 0.0, sh);
         }
-        // Milky Way in J2000 RA/Dec with galactic-coordinate dust texture
+        // Milky Way from an all-sky photograph (ESO/S. Brunier), stars removed, mapped in galactic coordinates
         if (sh > -0.05) {
           vec3 e = transpose(uEqToWorld) * d;
-          float ra = atan(e.y, e.x); if (ra < 0.0) ra += 2.0*PI; float dec = asin(clamp(e.z,-1.0,1.0));
-          float mw = texture(uMW, vec2(ra/(2.0*PI), dec/PI + 0.5)).r;
           vec3 g = uGal * e; float gl = atan(g.y, g.x), gb = asin(clamp(g.z,-1.0,1.0));
-          float dust = fbm2(vec2(gl*9.0, gb*28.0)), mott = fbm2(vec2(gl*40.0, gb*40.0));
-          float core = exp(-pow(gl/0.5, 2.0) - pow(gb/0.18, 2.0));
-          float lanes = smoothstep(0.35, 0.75, dust) * exp(-pow(gb/0.06, 2.0)) * (0.5 + core);
-          float m = mw * (0.75 + 0.5*mott) * (1.0 - 0.7*lanes) + core*0.35*(1.0-lanes);
-          vec3 mwc = mix(vec3(0.85, 0.88, 1.0), vec3(1.0, 0.9, 0.75), core);
+          vec3 mw = texture(uMW, vec2(0.5 - gl/(2.0*PI), 0.5 + gb/PI)).rgb; mw *= mw;   // stored sqrt-encoded
           vec3 T = directT(max(sh, 0.0));
-          col += mwc * m * 1.3e-3 * uMWScale * uExposure * T * smoothstep(-0.05, 0.03, sh);
+          col += mw * 1.3e-3 * uMWScale * uExposure * T * smoothstep(-0.05, 0.03, sh);
+        }
+        // Aurora: emission between ~100 and ~250 km where the auroral oval sits (green below, red above)
+        if (uAurora.z > 0.0 && sh > -0.02) {
+          vec3 dE = uENU * vec3(d.x, -d.z, d.y);            // world (east, up, south) -> Earth-fixed
+          float Rk = 6371.0, acc = 0.0, red = 0.0;
+          for (int k = 0; k < 5; k++) {
+            float hk = 100.0 + float(k)*35.0;
+            float b = dot(uObsECEF, dE), c = dot(uObsECEF, uObsECEF) - (Rk + hk)*(Rk + hk);
+            float tk = -b + sqrt(max(b*b - c, 0.0));
+            vec3 P = uObsECEF + dE*tk; vec3 Pn = normalize(P);
+            float ml = asin(clamp(dot(Pn, uMagAxis), -1.0, 1.0));
+            float aml = abs(ml);
+            float band = smoothstep(uAurora.x - 0.02, uAurora.x + 0.015, aml) * smoothstep(uAurora.x + uAurora.y + 0.03, uAurora.x + uAurora.y - 0.01, aml);
+            if (band <= 0.001) continue;
+            vec3 ref = normalize(cross(uMagAxis, vec3(0.0, 0.0, 1.0)) + 1e-4);
+            float mlon = atan(dot(Pn, cross(uMagAxis, ref)), dot(Pn, ref));
+            // curtains: folded arcs with fine vertical rays, drifting slowly
+            float arcs = fbm2(vec2(mlon*18.0 + uTime*0.02, aml*90.0));
+            float rays = 0.55 + 0.45*fbm2(vec2(mlon*260.0 + uTime*0.15, uTime*0.05));
+            float curtain = smoothstep(0.42, 0.7, arcs) * rays;
+            float layer = exp(-pow((hk - 115.0)/30.0, 2.0)), upper = smoothstep(150.0, 230.0, hk);
+            acc += curtain * band * layer * 0.35;
+            red += curtain * band * upper * 0.25;
+          }
+          // a 1 kR green aurora is ~1.9e-4 cd/m^2; uAurora.z is the peak brightness in kR
+          // looking obliquely through the emitting layer collects more light (up to ~5x toward the horizon)
+          float slant = min(5.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/(6371.0 + 110.0), 2.0)), 0.2));
+          vec3 aur = (vec3(0.15, 1.0, 0.35)*acc + vec3(1.0, 0.12, 0.25)*red*(0.4 + uAurora.w)) * uAurora.z * 1.9e-4 * slant * 2.5;
+          col += aur * directT(max(sh, 0.0)) * uExposure * smoothstep(-0.02, 0.02, sh);
         }
         gl_FragColor = vec4(min(col, vec3(3.0e4)), 1.0);
       }`,
@@ -163,6 +193,12 @@ export function makeSkyBackground(U, mwTex) {
   return mesh;
 }
 
+// Milky Way photograph (galactic coordinates), see tools/milkyway.py
+export function milkyWayPhoto() {
+  const t = new THREE.TextureLoader().load('data/milkyway.jpg');
+  t.colorSpace = THREE.NoColorSpace; t.wrapS = THREE.RepeatWrapping; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.anisotropy = 4;
+  return t;
+}
 // Milky Way brightness map from contour polygons (equirectangular RA/Dec), blurred.
 export function milkyWayTexture(levels) {
   const W = 2048, H = 1024, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
@@ -212,12 +248,12 @@ export function makePlanets(U) {
   const pts = new THREE.Points(geo, starMaterial(U, false)); pts.frustumCulled = false; pts.renderOrder = -89;
   return pts;
 }
-function starMaterial(U, eq) {
-  Object.assign(U, { uPxSr: { value: 1e-6 }, uPxScale: { value: 1 }, uSeeing: { value: 1 } });
+export function starMaterial(U, eq) {
+  if (!U.uPxSr) Object.assign(U, { uPxSr: { value: 1e-6 }, uPxScale: { value: 1 }, uSeeing: { value: 1 }, uZoomGain: { value: 0 } });
   return new THREE.ShaderMaterial({
     uniforms: U, transparent: true, depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: '#include <common>\n' + COMMON + /* glsl */`
-      attribute float mag; attribute vec3 color; uniform mat3 uEqToWorld; uniform float uPxSr, uPxScale, uSeeing;
+      attribute float mag; attribute vec3 color; uniform mat3 uEqToWorld; uniform float uPxSr, uPxScale, uSeeing, uZoomGain;
       out vec3 vCol; out float vSize;
       #include <logdepthbuf_pars_vertex>
       void main(){
@@ -231,7 +267,7 @@ function starMaterial(U, eq) {
         // local sky brightness -> naked-eye limiting magnitude (Schaefer); stars fade as the sky brightens
         vec3 sky = skyL(d) / uExposure; float Ls = max(dot(sky, vec3(0.2126,0.7152,0.0722)), 1e-6);
         float sqm = 12.583 - 2.5*log(Ls)/log(10.0);
-        float lim = 7.93 - 5.0*log(pow(10.0, 4.316 - sqm/5.0) + 1.0)/log(10.0);
+        float lim = 7.93 - 5.0*log(pow(10.0, 4.316 - sqm/5.0) + 1.0)/log(10.0) + uZoomGain;
         float mObs = m - 2.5*log(max(dot(T, vec3(0.2126,0.7152,0.0722)), 1e-5))/log(10.0);
         float vis = smoothstep(lim + 0.4, lim - 0.9, mObs) * smoothstep(-0.03, 0.01, d.y);
         float E = 2.54e-6 * pow(10.0, -0.4*m); // lux
@@ -324,4 +360,19 @@ export function makeMoon(U) {
   });
   const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = -80;
   return m;
+}
+
+// Faint stars (6.6 < V <= 8) loaded on demand; they only show when zoomed in under dark skies.
+export async function makeFaintStars(U) {
+  const buf = await (await fetch('data/stars8.bin')).arrayBuffer(), dv = new DataView(buf), n = buf.byteLength / 6;
+  const pos = new Float32Array(n * 3), mag = new Float32Array(n), col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const ra = dv.getUint16(i * 6, true) / 65535 * 2 * Math.PI, de = dv.getInt16(i * 6 + 2, true) / 32767 * Math.PI / 2;
+    pos[i * 3] = Math.cos(de) * Math.cos(ra); pos[i * 3 + 1] = Math.cos(de) * Math.sin(ra); pos[i * 3 + 2] = Math.sin(de);
+    mag[i] = dv.getUint8(i * 6 + 4) / 20; col.set(bvToRGB(dv.getInt8(i * 6 + 5) / 50), i * 3);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('mag', new THREE.BufferAttribute(mag, 1)); geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const pts = new THREE.Points(geo, starMaterial(U, true)); pts.frustumCulled = false; pts.renderOrder = -91;
+  return pts;
 }
