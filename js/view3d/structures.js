@@ -25,14 +25,14 @@ export const LIT_VS = '#include <common>\n' + COMMON + /* glsl */`
 
 export function lighting() {
   return /* glsl */`
-  uniform sampler2D uLightMap; uniform float uLightHalf;
+  uniform sampler2D uLightMap, uSportsMap; uniform float uLightHalf, uSports;
   vec3 shade(vec3 alb, vec3 n, vec3 W, float lmHeightFade){
     vec3 E = uSunE * directT(uSunDir.y) * max(dot(n, uSunDir), 0.0) * smoothstep(-0.01, 0.02, uSunDir.y)
            + uMoonE * directT(uMoonDir.y) * max(dot(n, uMoonDir), 0.0) * smoothstep(-0.01, 0.02, uMoonDir.y);
     vec3 sky = mix(skyL(normalize(vec3(n.x, 0.12, n.z))), skyL(vec3(0.0,1.0,0.0)), 0.5 + 0.5*n.y) * PI * (0.75 + 0.25*n.y);
     vec3 col = alb/PI * (E*uExposure*(1.0 - 0.9*uOvercast) + sky*0.85*(1.0 - 0.65*uOvercast));
     vec2 luv = W.xz/(2.0*uLightHalf) + 0.5;
-    if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) col += alb/PI * texture(uLightMap, luv).rgb * 40.0 * uExposure * uNight * lmHeightFade;
+    if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) col += alb/PI * (texture(uLightMap, luv).rgb * 40.0 + texture(uSportsMap, luv).rgb * 400.0 * uSports) * uExposure * uNight * lmHeightFade;
     col += vec3(0.85,0.88,1.0)*uFlash.w*0.02*alb*exp(-length(W - uFlash.xyz)/8000.0);
     return aerial(col, normalize(W - cameraPosition), length(W - cameraPosition));
   }`;
@@ -315,7 +315,9 @@ export class Structures {
     this.buildTurbines(osm.turbines);
     this.buildTowers(osm.towers);
     this.buildAreas(osm);
+    this.buildSports(osm);
     this.ground.setLights(this.lamps, this.areas);
+    this.ground.setSports(this.sportsAreas);
     this.buildColliderGrid();
     this.segGrid = null;
     const pts = this.lamps.filter(l => l.glow !== false).map(l => ({ x: l.x, y: l.y, z: l.z, cd: l.cd, c: l.cc || [1, 0.75, 0.45], blink: l.blink }));
@@ -1001,7 +1003,6 @@ export class Structures {
       }
     };
     for (const a of osm.industrial) if (a.plant || est) addArea(a.ring, 0, [255, 170, 90], a.plant ? 60 : 110, a.plant ? 9000 : 4000, [1, 0.62, 0.3], { nearRoad: !a.plant });
-    for (const a of osm.lit) addArea(a.ring, 25, [240, 240, 255], 70, 30000, [0.95, 0.95, 1], { edges: true });
     for (const a of osm.parking) addArea(a.ring, 0, [235, 235, 255], est ? 35 : 0, 2500, [0.95, 0.95, 1], { h: 9 });
     for (const f of osm.fuel) if (f.ring) addArea(f.ring, 120, [245, 245, 255], 0, 0); else { const [x, y] = this.local.toXY(f.p[0], f.p[1]); const g = this.h(x, -y); this.lamps.push({ x, z: -y, y: g + 5, cd: 15000, r: 30, i: 1, c: [245, 245, 255], cc: [0.95, 0.95, 1] }); poles.push([x, g, -y, 5]); }
     if (poles.length) {
@@ -1011,6 +1012,58 @@ export class Structures {
       poles.forEach((q, k) => { M.makeScale(1 + q[3] / 30, q[3], 1 + q[3] / 30); M.setPosition(q[0], q[1], q[2]); im.setMatrixAt(k, M); });
       im.frustumCulled = false; this.group.add(im);
     }
+  }
+  // Floodlit sports fields: fields mapped lit=yes always, lit=no never; for untagged ones only about a third of
+  // real-sized fields for floodlit sports in built-up areas (no tiny courts, nothing rural). Big fields get six
+  // ~24 m masts beside the long sides, small ones four ~12 m masts at the corners; the field itself is lit to
+  // ~300 lux with a little spill. They switch off at 10:30 pm local time (view.js sets uSports).
+  buildSports(osm) {
+    this.sportsAreas = []; this.sportsGlow = null;
+    const list = (osm.pitches && osm.pitches.length ? osm.pitches : (osm.overture && osm.overture.cover && osm.overture.cover.pitches) || []).slice();
+    for (const r of osm.lit || []) list.push({ ring: r.ring, sport: '', lit: 'yes', kind: 'sports_centre' });
+    const seen = new Set(), masts = [], glare = [], half = this.ctx.detail * 2.4;
+    const SPORT = /soccer|football|baseball|softball|tennis|multi|rugby|athletics|hockey|lacrosse|cricket|basketball|volleyball|padel|pickleball/;
+    for (const f of list) {
+      const p = ringLocal(this.local, f.ring); if (p.length < 4) continue;
+      const key = Math.round(p[0][0]) + ',' + Math.round(p[0][1]); if (seen.has(key)) continue; seen.add(key);
+      let cx = 0, cz = 0; for (const q of p) { cx += q[0]; cz += q[1]; } cx /= p.length; cz /= p.length;
+      if (Math.abs(cx) > half || Math.abs(cz) > half) continue;
+      let area = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) area += (p[j][0] + p[i][0]) * (p[j][1] - p[i][1]); area = Math.abs(area) / 2;
+      if (f.lit === 'no' || /no|disused/.test(f.lit)) continue;
+      const small = /tennis|basketball|volleyball|padel|pickleball/.test(f.sport) || area < 1500;
+      if (f.lit !== 'yes') {
+        if (area > 40000 || area < (small ? 450 : 2500)) continue;
+        if (f.sport && !SPORT.test(f.sport)) continue;          // golf, equestrian, skate parks...
+        if (this.ctx.urbanAt(cx, cz) < 0.45) continue;
+        if (hash(Math.round(cx * 7.3 + cz * 3.1)) > (f.sport ? 0.35 : 0.25)) continue;
+      }
+      // orientation from the longest edge, extents along and across it
+      let best = 0, ux = 1, uz = 0;
+      for (let i = 0; i < p.length - 1; i++) { const dx = p[i + 1][0] - p[i][0], dz = p[i + 1][1] - p[i][1], L = Math.hypot(dx, dz); if (L > best) { best = L; ux = dx / L; uz = dz / L; } }
+      let a0 = 1e9, a1 = -1e9, b0 = 1e9, b1 = -1e9;
+      for (const q of p) { const a = (q[0] - cx) * ux + (q[1] - cz) * uz, b = -(q[0] - cx) * uz + (q[1] - cz) * ux; a0 = Math.min(a0, a); a1 = Math.max(a1, a); b0 = Math.min(b0, b); b1 = Math.max(b1, b); }
+      const H = small ? 12 : 24, off = small ? 1.5 : 5;
+      const spots = small ? [[a0, b0 - off], [a1, b0 - off], [a0, b1 + off], [a1, b1 + off]]
+        : [[a0 + 0.1 * (a1 - a0), b0 - off], [(a0 + a1) / 2, b0 - off], [a1 - 0.1 * (a1 - a0), b0 - off], [a0 + 0.1 * (a1 - a0), b1 + off], [(a0 + a1) / 2, b1 + off], [a1 - 0.1 * (a1 - a0), b1 + off]];
+      for (const [a, b] of spots) {
+        const x = cx + a * ux - b * uz, z = cz + a * uz + b * ux;
+        if (this.nearBuilding(x, z, 1.5) || this.ground.isWater(x, z)) continue;
+        const g = this.h(x, z);
+        masts.push([x, g, z, H, Math.atan2(-(cz - z), cx - x)]);
+        glare.push({ x, y: g + H, z, cd: small ? 25000 : 90000, c: [0.95, 0.97, 1], sports: true });
+        this.col.circles.push({ x, z, r: small ? 0.25 : 0.45, top: g + H });
+      }
+      this.sportsAreas.push({ ring: p, lux: small ? 250 : 300 });
+    }
+    this.sportsCount = this.sportsAreas.length;
+    if (!masts.length) return;
+    const pole = new THREE.CylinderGeometry(0.12, 0.22, 1, 6).translate(0, 0.5, 0), head = new THREE.BoxGeometry(0.4, 0.1, 2.4).translate(0, 1.02, 0);
+    const mast = mergeGeos([pole, head]);
+    mast.setAttribute('aInfo', new THREE.Float32BufferAttribute(new Float32Array(mast.attributes.position.count * 4), 4));
+    const im = new THREE.InstancedMesh(mast, plainLit(this.U, 0x707070), masts.length), M = new THREE.Matrix4(), R = new THREE.Matrix4();
+    masts.forEach((m, i) => { M.makeScale(1 + m[3] / 40, m[3], 1 + m[3] / 40); R.makeRotationY(m[4]); M.premultiply(R); M.setPosition(m[0], m[1], m[2]); im.setMatrixAt(i, M); });
+    im.frustumCulled = false; this.group.add(im);
+    this.sportsGlow = lightPoints(this.U, glare); this.group.add(this.sportsGlow);
   }
   update(time, frameInfo) { for (const f of this.anim) f(time); }
   dispose() { this.group.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material.dispose) o.material.dispose(); }); }

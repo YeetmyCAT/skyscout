@@ -5,6 +5,12 @@
 // Fields the backup lacks are filled from the last saved Open-Meteo forecast when there is one.
 import { cachedJSON, mean, std } from './util.js';
 
+function zoneAt(lat, lon) { try { return typeof tzlookup === 'function' ? tzlookup(lat, lon) : undefined; } catch { return undefined; } }
+function zoneOffset(tz, lon) {
+  if (!tz) return Math.round(lon / 15) * 3600;
+  try { const d = new Date(), f = z => new Date(d.toLocaleString('en-US', { timeZone: z })); return Math.round((f(tz) - f('UTC')) / 1000); }
+  catch { return Math.round(lon / 15) * 3600; }
+}
 export const BACKUP_NAMES = { met_norway: 'MET Norway (ECMWF-based)', nws: 'US National Weather Service (NBM)' };
 const MET = 'https://api.met.no/weatherapi/locationforecast/2.0/complete';
 const TTL = 45 * 60e3;
@@ -135,7 +141,10 @@ export async function backupForecast(lat, lon, saved, opts = {}) {
   const t = []; for (let x = Math.floor(start / 3600) * 3600; x <= end; x += 3600) t.push(x);
   const names = new Set([...all.flatMap(s => Object.keys(s.v)), ...(saved ? Object.keys(saved.v) : [])]);
   const out = { t, v: {}, models: Object.keys(src), backup: true, filled: [], elevation: met ? met.elevation : saved ? saved.elevation : 0,
-    fetched: Math.min(...all.map(s => s.fetched)), stale: false, tz: (nws && nws.tz) || (saved && saved.tz), utcOffset: saved ? saved.utcOffset : Math.round(lon / 15) * 3600 };
+    fetched: Math.min(...all.map(s => s.fetched)), stale: false };
+  // time zone: from NWS or the saved forecast, else an offline lookup by coordinates (tz-lookup)
+  out.tz = (nws && nws.tz) || (saved && saved.tz) || zoneAt(lat, lon);
+  out.utcOffset = saved && saved.tz === out.tz ? saved.utcOffset : zoneOffset(out.tz, lon);
   for (const name of names) {
     const per = {}, step = name === 'weather_code';
     for (const [m, s] of Object.entries(src)) if (s.v[name] && s.v[name].some(x => x != null)) per[m] = resample(s.t, s.v[name], t, step);

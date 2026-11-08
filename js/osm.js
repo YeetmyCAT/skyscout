@@ -65,7 +65,7 @@ out geom qt;`;
 const num = v => { if (v == null) return null; const m = String(v).match(/[\d.]+/); return m ? parseFloat(m[0]) : null; };
 
 function classify(data, meta) {
-  const out = { parks: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
+  const out = { parks: [], pitches: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: meta.t, stale: meta.stale };
   for (const e of data.elements || []) {
     const t = e.tags || {};
     const geom = e.geometry ? e.geometry.map(p => [p.lat, p.lon]) : null;
@@ -103,7 +103,7 @@ function classify(data, meta) {
     else if (t.man_made) out.towers.push({ p: geom[0], ring: geom, kind: t.man_made, h: num(t.height) || ({ chimney: 60, water_tower: 35, silo: 25, storage_tank: 14 }[t.man_made] || 20) });
     else if (t.power === 'plant') out.industrial.push({ ring: geom, plant: true, name: t.name });
     else if (t.landuse === 'industrial') out.industrial.push({ ring: geom });
-    else if (/^(park|playground|pitch|golf_course|recreation_ground|nature_reserve|dog_park|track|stadium)$/.test(t.leisure || '') || /^(cemetery|recreation_ground|village_green)$/.test(t.landuse || '')) { out.parks.push({ ring: geom }); if (t.lit === 'yes' && t.leisure) out.lit.push({ ring: geom }); }
+    else if (/^(park|playground|pitch|golf_course|recreation_ground|nature_reserve|dog_park|track|stadium)$/.test(t.leisure || '') || /^(cemetery|recreation_ground|village_green)$/.test(t.landuse || '')) { out.parks.push({ ring: geom }); if (/^(pitch|stadium|track)$/.test(t.leisure || '')) out.pitches.push({ ring: geom, sport: t.sport || '', lit: t.lit || '', kind: t.leisure }); else if (t.lit === 'yes' && t.leisure) out.lit.push({ ring: geom }); }
     else if (t.leisure && t.lit === 'yes') out.lit.push({ ring: geom });
     else if (t.amenity === 'parking') { out.parking.push({ ring: geom }); if (!t.parking || /surface|lane/.test(t.parking)) out.paved.push({ ring: geom, kind: 'parking' }); }
     else if (t.amenity === 'fuel') out.fuel.push({ p: geom[0], ring: geom });
@@ -152,10 +152,11 @@ export async function loadOverture(lat, lon, detail) {
     roofShape: pr.roof_shape, source: String(pr['@geometry_source'] || 'Overture'),
   }));
   const addrs = a.filter(f => f.type === 1).map(f => ({ p: f.rings[0][0], overture: true }));
-  const cover = { grass: [], tree: [], crop: [], urban: [], parks: [] };
+  const cover = { grass: [], tree: [], crop: [], urban: [], parks: [], pitches: [] };
   for (const f of lc) { if (f.type !== 3) continue; const k = f.props.subtype; if (k === 'grass' || k === 'shrub' || k === 'moss' || k === 'wetland') cover.grass.push(...f.rings); else if (k === 'tree' || k === 'forest' || k === 'mangrove') cover.tree.push(...f.rings); else if (k === 'crop') cover.crop.push(...f.rings); else if (k === 'urban') cover.urban.push(...f.rings); }
   for (const f of lu) { if (f.type !== 3) continue; const c = (f.props.class || '') + ' ' + (f.props.subtype || ''); if (/bunker|parking|water_hazard/.test(c)) continue; if (/park|grass|golf|fairway|green|tee|rough|cemetery|recreation|meadow|village_green|garden|pitch|playground|lawn|common/.test(c)) cover.grass.push(...f.rings);
-    if (/park|golf|cemetery|recreation_ground|pitch|playground|village_green|nature_reserve|stadium|track/.test(c)) cover.parks.push(...f.rings); }
+    if (/park|golf|cemetery|recreation_ground|pitch|playground|village_green|nature_reserve|stadium|track/.test(c)) cover.parks.push(...f.rings);
+    if (/^(pitch|stadium|track) /.test(c)) for (const ring of f.rings) cover.pitches.push({ ring, sport: '', lit: '', kind: c.split(' ')[0] }); }
   return { buildings, addrs, cover, counts: { buildings: buildings.length, addrs: addrs.length } };
 }
 
@@ -171,7 +172,7 @@ export async function loadOvertureScene(lat, lon, detail) {
     overtureFeatures('base', 'land_use', lat, lon, mid, 13).catch(() => []),
     overtureFeatures('base', 'land_cover', lat, lon, mid, 13).catch(() => []),
   ]);
-  const out = { parks: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: Date.now(), stale: false };
+  const out = { parks: [], pitches: [], addrs: [], rails: [], paved: [], buildings: [], farms: [], rivers: [], trees: [], forests: [], water: [], roads: [], lamps: [], powerLines: [], turbines: [], towers: [], lit: [], industrial: [], parking: [], fuel: [], runways: [], fetched: Date.now(), stale: false };
   const byId = new Map();
   for (const f of b) {
     if (f.type !== 3 || !f.rings.length || f.props.is_underground) continue;

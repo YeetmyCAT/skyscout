@@ -279,7 +279,7 @@ function nightScore(d, night) {
 }
 function renderConditions() {
   const d = S.data; if (!d) return;
-  const P = d.point, z = P.tz, night = nightInfo(S.time, d.lat, d.lon, P.elevation);
+  const P = d.point, z = P.tz || undefined, night = nightInfo(S.time, d.lat, d.lon, P.elevation);
   d.night = night;
   const ns = nightScore(d, night);
   const sqm = d.lp ? lum2mag(NAT_SKY + d.lp.zenith) : null;
@@ -578,7 +578,7 @@ async function loadStructuresNow() {
     const lat = v.ctx.lat, al = Math.abs(lat), coniferShare = al > 58 ? 0.92 : al > 50 ? 0.6 : al > 42 ? 0.35 : al < 23 ? 0 : 0.2;
     const urban = v.urban ? ((x, z) => { const [la, lo] = v.ctx.local.toLL(x, -z); return v.urban(la, lo); }) : (() => 0);
     const stats = v.setStructures(osm, { detail, canopyTrees: canopy, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
-    st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees${canopy ? ` (incl. crowns seen in aerial photos)` : ''}, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
+    st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees${canopy ? ` (incl. crowns seen in aerial photos)` : ''}, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${v.structures.sportsCount ? `, ${v.structures.sportsCount} floodlit sports fields (on until 10:30 pm)` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
   } catch (e) { st.textContent = 'Could not load map data: ' + e.message; }
   btn.disabled = false;
 }

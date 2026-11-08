@@ -120,8 +120,13 @@ export class Immersive {
   // ---------- data ----------
   async open(ctx, progress = () => { }) {
     this.ctx = ctx;
-    for (const o of [this.groundObj, this.grass, this.cityLights, this.structures && this.structures.group, this.structGlowFg, this.carsFg]) if (o) { (o.group || o).removeFromParent && (o.group || o).removeFromParent(); }
-    if (this.structures) { this.structures.dispose(); this.structures = null; }
+    // forget everything from the previous place: buildings, their light glare and traffic (kept in the foreground
+    // pass), farms, ground light pools, far city lights
+    this.clearStructures();
+    if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; }
+    for (const o of [this.groundObj, this.grass, this.cityLights]) if (o) { (o.group || o).removeFromParent && (o.group || o).removeFromParent(); }
+    this.cityLights = null; this.roadMask = null;
+    if (this.U.uLightMap) this.U.uLightMap.value = null; if (this.U.uSportsMap) this.U.uSportsMap.value = null;
     const { local, groundZ } = ctx;
     this.ground = new Ground(this.U, local, groundZ, this.q);
     const roadsP = roadMasks(local).catch(() => null);   // in parallel with the terrain
@@ -196,7 +201,7 @@ export class Immersive {
   clearStructures() {
     if (!this.structures) return;
     this.structures.group.removeFromParent(); this.structures.glow && this.structures.glow.removeFromParent(); this.structures.carPts && this.structures.carPts.removeFromParent();
-    this.structures.dispose(); this.structures = null; this.U.uLightMap.value = null;
+    this.structures.dispose(); this.structures = null; if (this.U.uLightMap) this.U.uLightMap.value = null; if (this.U.uSportsMap) this.U.uSportsMap.value = null;
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; if (this.grass) { this.grass.exclude = null; this.grass.center = null; } }
   }
   setFarStorms(list) { this.farStorms.setForecast(null); this.farStorms.set(list || []); }
@@ -268,6 +273,9 @@ export class Immersive {
     const local = new Date(this.date.getTime() + ((this.ctx.utcOffset || 0) - (-this.date.getTimezoneOffset() * 60)) * 1000);
     const h = local.getHours() + local.getMinutes() / 60;
     const lit = h >= 17 || h < 1 ? 0.55 - Math.max(0, h - 21) * 0.06 : h < 5 ? 0.08 : h < 8 ? 0.3 : 0.15;
+    // sports floodlights: evenings until 10:30 pm local
+    U.uSports.value = h >= 15 && h < 22.5 ? 1 : 0;
+    if (this.structures && this.structures.sportsGlow) this.structures.sportsGlow.visible = U.uSports.value > 0 && sunAlt < -2;
     U.uLitFrac.value = lit;
     if (this.structures) this.structures.setTraffic((congestion(local) - 1) * 0.9 + (h > 6 && h < 22 ? 0.45 : 0.08));
   }

@@ -357,8 +357,12 @@ export function starMaterial(U, eq) {
         float mObs = m - 2.5*log(max(dot(T, vec3(0.2126,0.7152,0.0722)), 1e-5))/log(10.0);
         float vis = smoothstep(lim + 0.4, lim - 0.9, mObs) * smoothstep(-0.03, 0.01, d.y);
         float E = 2.54e-6 * pow(10.0, -0.4*m); // lux
-        // twinkling grows toward the horizon
-        float tw = 1.0 + 0.45*sin(uTime*(13.0 + fract(position.x*91.7)*20.0) + position.y*300.0) * clamp(1.6/(max(d.y,0.02)*12.0+1.0), 0.0, 1.0);
+        // scintillation (stars only: planets, satellites and meteors are extended or not twinkling): random flicker
+        // of a few percent overhead, growing with the air mass toward the horizon
+        ${eq ? `float sd = fract(position.x*91.7 + position.z*53.1)*100.0;
+        float X = 1.0/(max(d.y, 0.0) + 0.025*exp(-11.0*max(d.y, 0.0)) + 0.0001);
+        float sig = min(0.03*pow(min(X, 30.0), 1.25), 0.3);
+        float tw = 1.0 + sig*1.6*(vnoise(vec2(uTime*9.0 + sd, sd*0.37)) + vnoise(vec2(uTime*17.0 - sd, sd*1.3)) - 1.0);` : 'float tw = 1.0;'}
         float size = (2.6 + max(0.0, 2.5 - m)*1.4) * uPxScale * uSeeing;
         float area = 3.1416*size*size*0.25;
         vCol = color * T * E / (uPxSr*area) * uExposure * vis * tw * 9.0;   // the eye integrates point sources better than a pixel does

@@ -19,7 +19,7 @@ export function terrainMaterial(U, albedo, opts = {}) {
       }`,
     fragmentShader: COMMON + /* glsl */`
       in vec2 vUv; in vec3 vN; in vec3 vW;
-      uniform sampler2D uAlb, uLightMap, uWaterMask; uniform float uHasAlb, uUseLM, uLightHalf, uHasWater; uniform vec3 uBase;
+      uniform sampler2D uAlb, uLightMap, uWaterMask, uSportsMap; uniform float uSports; uniform float uHasAlb, uUseLM, uLightHalf, uHasWater; uniform vec3 uBase;
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
@@ -48,7 +48,7 @@ export function terrainMaterial(U, albedo, opts = {}) {
         vec3 col = alb/PI * (E*uExposure*(1.0 - 0.9*uOvercast) + sky*0.85*(1.0 - 0.65*uOvercast));
         if (uUseLM > 0.5){
           vec2 luv = vW.xz/(2.0*uLightHalf) + 0.5;
-          if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) col += alb/PI * texture(uLightMap, luv).rgb * 40.0 * uExposure * uNight;
+          if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) col += alb/PI * (texture(uLightMap, luv).rgb * 40.0 + texture(uSportsMap, luv).rgb * 400.0 * uSports) * uExposure * uNight;
         }
         // specular sheen on wet ground / water from the sky
         col += uWet*0.08 * hazeL(reflect(normalize(vW - cameraPosition), n)) * pow(1.0 - max(dot(-normalize(vW - cameraPosition), n), 0.0), 3.0);
@@ -81,7 +81,10 @@ export class Ground {
   constructor(U, local, groundZ, quality) {
     this.U = U; this.local = local; this.groundZ = groundZ; this.q = quality; this.group = new THREE.Group();
     this.nearHalf = 4000; this.midHalf = 40000; this.farHalf = 180000;
-    U.uLightMap = { value: null }; U.uLightHalf = { value: this.nearHalf };
+    if (U.uLightMap) U.uLightMap.value = null; else U.uLightMap = { value: null };   // keep the shared uniform object (other materials hold it)
+    if (U.uLightHalf) U.uLightHalf.value = this.nearHalf; else U.uLightHalf = { value: this.nearHalf };
+    if (U.uSportsMap) U.uSportsMap.value = null; else U.uSportsMap = { value: null };   // floodlit fields (0..1 = 0..400 lux)
+    if (!U.uSports) U.uSports = { value: 0 };
   }
   async build(progress) {
     const { local } = this, [lat, lon] = [local.lat0, local.lon0];
@@ -163,6 +166,23 @@ export class Ground {
     const i = Math.floor((x + this.nearHalf) / (2 * this.nearHalf) * P.width), j = Math.floor((z + this.nearHalf) / (2 * this.nearHalf) * P.height);
     if (i < 0 || j < 0 || i >= P.width || j >= P.height) return [80, 100, 60];
     const k = (j * P.width + i) * 4; return [P.data[k], P.data[k + 1], P.data[k + 2]];
+  }
+  // Floodlit sports fields: their own map with a much higher range (fields are lit to hundreds of lux)
+  setSports(areas) {
+    if (!areas || !areas.length) { this.U.uSportsMap.value = null; return; }
+    const S = 1024, half = this.nearHalf, cv = document.createElement('canvas'); cv.width = cv.height = S;
+    const g = cv.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0, 0, S, S); g.globalCompositeOperation = 'lighter';
+    const px = m => m / (2 * half) * S;
+    const poly = (ring, k, cx, cz) => { g.beginPath(); ring.forEach(([x, z], i) => { const X = px(cx + (x - cx) * k + half), Z = px(cz + (z - cz) * k + half); i ? g.lineTo(X, Z) : g.moveTo(X, Z); }); g.closePath(); g.fill(); };
+    for (const A of areas) {
+      let cx = 0, cz = 0; for (const q of A.ring) { cx += q[0]; cz += q[1]; } cx /= A.ring.length; cz /= A.ring.length;
+      const v = Math.min(255, A.lux / 400 * 255);
+      g.fillStyle = `rgb(${v * 0.08 | 0},${v * 0.08 | 0},${v * 0.085 | 0})`; poly(A.ring, 1.35, cx, cz);   // spill around the field
+      g.fillStyle = `rgb(${v * 0.12 | 0},${v * 0.12 | 0},${v * 0.125 | 0})`; poly(A.ring, 1.12, cx, cz);
+      g.fillStyle = `rgb(${v * 0.8 | 0},${v * 0.8 | 0},${v * 0.83 | 0})`; poly(A.ring, 1.0, cx, cz);
+    }
+    const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.NoColorSpace; t.flipY = false;
+    this.U.uSportsMap.value = t;
   }
   // Light map (lux, linear /40) from lamp positions and lit areas
   setLights(lamps, areas) {
