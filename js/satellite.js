@@ -69,6 +69,33 @@ function nearest(cm, r, g, b) {
   nearCache.set(k, best); return best;
 }
 
+// Thunderstorm complexes out to ~700 km from the infrared image: connected areas of very cold cloud top (< -45 C)
+// that contain deep convective cores (< -55 C). Used for distant storms on the horizon (lightning flicker, sprites).
+export function stormsFromIR(ir, local, radiusKm = 700) {
+  const C = 10000, R = radiusKm * 1000, n = Math.round(2 * R / C), T = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) { const [la, lo] = local.toLL((i + 0.5) * C - R, (j + 0.5) * C - R); T[j * n + i] = ir.sample(la, lo); }
+  const seen = new Uint8Array(n * n), out = [];
+  for (let s0 = 0; s0 < n * n; s0++) {
+    if (seen[s0] || !(T[s0] < -45)) continue;
+    const stack = [s0], cells = []; seen[s0] = 1; let minT = 0;
+    while (stack.length) {
+      const c = stack.pop(); cells.push(c); minT = Math.min(minT, T[c]);
+      const ci = c % n, cj = (c / n) | 0;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const a = ci + di, b = cj + dj; if (a < 0 || b < 0 || a >= n || b >= n) continue; const k = b * n + a; if (!seen[k] && T[k] < -45) { seen[k] = 1; stack.push(k); } }
+    }
+    const area = cells.length * 100;                                 // km^2
+    if (area < 2500 || minT > -55) continue;
+    let sx = 0, sy = 0, edge = 1e12;
+    for (const c of cells) { const x = (c % n + 0.5) * C - R, y = (((c / n) | 0) + 0.5) * C - R; sx += x; sy += y; edge = Math.min(edge, Math.hypot(x, y)); }
+    sx /= cells.length; sy /= cells.length;
+    if (edge < 100000) continue;                                     // nearer storms are part of the 3D cloud field
+    const az = (Math.atan2(sx, sy) * 180 / Math.PI + 360) % 360, ux = Math.cos(az * Math.PI / 180), uy = -Math.sin(az * Math.PI / 180);
+    let w0 = 1e12, w1 = -1e12; for (const c of cells) { const x = (c % n + 0.5) * C - R, y = (((c / n) | 0) + 0.5) * C - R, w = x * ux + y * uy; w0 = Math.min(w0, w); w1 = Math.max(w1, w); }
+    out.push({ id: `ir${out.length}:${Math.round(az)}`, az, distKm: edge / 1000, area, widthKm: Math.min(400, (w1 - w0) / 1000 + 10),
+      topKm: 10 + Math.min(1, Math.max(0, (-minT - 45) / 30)) * 6, strength: Math.min(1, Math.max(0, (-minT - 50) / 20)) * Math.min(1, Math.max(0.25, Math.sqrt(area) / 250)) });
+  }
+  return out;
+}
 // Cloud analysis grid for the 3D domain: per cell cloud fraction and top height (m MSL).
 export function analyseIR(ir, local, halfSize, n, prof, surfT, surfZ) {
   const frac = new Float32Array(n * n), top = new Float32Array(n * n), bt = new Float32Array(n * n);

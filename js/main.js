@@ -1,7 +1,7 @@
 // SkyScout: app controller — location, time, panels, map overlays, 3D view, scouting, sprites, offline.
 import { $, el, clamp, makeLocal, Net, fmtAgo, cachedJSON, haversine, bearing, destination, DEG, idbPrune, RateLimit } from './util.js';
 import { POINT_WEIGHT, pointForecast, gridForecast, airQuality, val, cloudLayers, cloudTypeNames, fogRisk, precipState, MODEL_NAMES, WMO, profile, GRID_MODELS } from './weather.js';
-import { loadIR, analyseIR, satLayer } from './satellite.js';
+import { loadIR, analyseIR, satLayer, stormsFromIR } from './satellite.js';
 import { atlasRatio, ratioToSqm } from './atlas.js';
 import { calibrateToAtlas, loadLights, skyBrightness, domeNames, bortle, BORTLE_TXT, nelm, lum2mag, NAT_SKY, loadRegionalLights, quickLP, QUICK } from './lightpol.js';
 import { nightInfo, sunMoon, phaseName } from './astro.js';
@@ -488,6 +488,13 @@ async function open3D(site) {
         sat = { obs: ir.obs, half, grid: analyseIR(ir, local, half, 96, profile(point, now), val(point, 'temperature_2m', now) ?? 10, point.elevation), name: ir.sat.name };
       }
     }
+    // distant thunderstorm complexes on the same satellite image (no forecast quota): horizon storms, flicker, sprites
+    let farAuto = null;
+    if (!(site && (site.spriteData || site.farStorms)) && Math.abs(S.time - Date.now()) < 7 * 3600e3 && satLayer(lon)) {
+      prog('Looking for distant thunderstorms on the satellite image…');
+      const irFar = await loadIR(lat, lon, 700).catch(() => null);
+      if (irFar) farAuto = { obs: irFar.obs, list: stormsFromIR(irFar, local, 700) };
+    }
     if (lights && !lp) {
       prog('Modelling light pollution across the whole sky…');
       const t = S.time.getTime() / 1000, L = cloudLayers(point, t, point.elevation);
@@ -501,7 +508,7 @@ async function open3D(site) {
     await S.view.open(ctx, prog);
     if (site && site.spriteData) { S.view.setStormForecast(site.spriteData); S.view.U.uSpriteMode.value = 1; $('#spriteSim').classList.add('on'); S.spriteView = { t0: S.time.getTime() / 1000 }; }
     else if (site && site.farStorms) { S.view.setFarStorms(site.farStorms); S.spriteView = null; }
-    else { S.view.setFarStorms([]); S.spriteView = null; }
+    else { S.view.setFarAuto(farAuto); S.spriteView = null; }
     $('#spritePrompt') && $('#spritePrompt').classList.add('hidden');
     if (site && site.lookAz != null) { S.view.yaw = site.lookAz; S.view.pitch = site.lookAlt || 10; }
     S.view.urban = lights ? urbanLookup(lights) : null;

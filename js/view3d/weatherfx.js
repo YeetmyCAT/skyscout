@@ -24,14 +24,15 @@ export class Precip {
           vec3 c = cameraPosition;
           vec3 p = vec3(mod(aSeed.x*uBox - c.x + uWindVec.x*uTime*0.0, uBox) - uBox*0.5 + c.x, y - uBox*0.35 + c.y, mod(aSeed.z*uBox - c.z, uBox) - uBox*0.5 + c.z);
           vec3 v = normalize(vec3(uWindVec.x, -speed, uWindVec.y));
-          p += v * aSeed.w * 0.55;
-          float vis = step(aSeed.x, uPrecipRate);
+          p += v * aSeed.w * (0.45 + 0.5*uPrecipRate);                 // heavier rain: longer, faster-looking streaks
+          // which drops show at this intensity: a separate random number, so rain fills the whole space evenly
+          float vis = step(fract(aSeed.x*91.37 + aSeed.y*47.11 + aSeed.z*13.73), uPrecipRate);
           vA = vis; vW = p;
           gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
           #include <logdepthbuf_vertex>
         }`,
       fragmentShader: COMMON + /* glsl */`
-        in float vA; in vec3 vW; uniform sampler2D uLightMap; uniform float uLightHalf;
+        in float vA; in vec3 vW; uniform sampler2D uLightMap; uniform float uLightHalf, uPrecipRate;
         #include <logdepthbuf_pars_fragment>
         void main(){
           #include <logdepthbuf_fragment>
@@ -39,7 +40,7 @@ export class Precip {
           vec3 amb = skyL(vec3(0.0, 1.0, 0.0)) * 0.9 + skyL(normalize(vec3(1.0, 0.1, 0.3))) * 0.6;
           vec2 luv = vW.xz/(2.0*uLightHalf) + 0.5; vec3 lm = vec3(0.0);
           if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) lm = texture(uLightMap, luv).rgb * 40.0 * uExposure * uNight * 0.05;
-          vec3 c = amb * 0.12 + lm + vec3(0.9)*uFlash.w*0.0015;
+          vec3 c = (amb * 0.12 + lm + vec3(0.9)*uFlash.w*0.0015) * (0.75 + 0.6*uPrecipRate);   // downpours read stronger
           gl_FragColor = vec4(c, 1.0);
         }`,
     }));
@@ -51,7 +52,7 @@ export class Precip {
     this.snow = new THREE.Points(sg, new THREE.ShaderMaterial({
       uniforms: U, transparent: true, depthWrite: false,
       vertexShader: '#include <common>\n' + COMMON + /* glsl */`
-        attribute vec4 aSeed; uniform float uPrecipRate, uBox, uPxScale; uniform vec2 uWindVec; out float vA; out vec3 vW;
+        attribute vec4 aSeed; uniform float uPrecipRate, uBox, uPxScale; uniform vec2 uWindVec; out float vA; out vec3 vW; out float vRot, vKind;
         #include <logdepthbuf_pars_vertex>
         void main(){
           float B = uBox*0.7;
@@ -59,23 +60,35 @@ export class Precip {
           vec3 c = cameraPosition;
           vec3 p = vec3(aSeed.x*B + uWindVec.x*uTime*0.6 + sin(uTime*1.3 + aSeed.y*30.0)*0.4, aSeed.y*B - uTime*fall, aSeed.z*B + uWindVec.y*uTime*0.6 + cos(uTime*1.1 + aSeed.x*20.0)*0.4);
           p = mod(p - c + B*0.5, B) - B*0.5 + c;
-          vA = step(aSeed.x, uPrecipRate); vW = p;
+          vA = step(fract(aSeed.x*91.37 + aSeed.y*47.11 + aSeed.z*13.73), uPrecipRate); vW = p;
+          vRot = aSeed.w*6.2832 + uTime*(aSeed.z - 0.5)*1.5; vKind = aSeed.y;
           vec4 mv = viewMatrix * vec4(p, 1.0);
-          gl_PointSize = clamp(60.0/(-mv.z), 1.0, 9.0) * uPxScale;
+          gl_PointSize = clamp(60.0/(-mv.z), 1.0, 22.0) * uPxScale;
           gl_Position = projectionMatrix * mv;
           #include <logdepthbuf_vertex>
         }`,
       fragmentShader: COMMON + /* glsl */`
-        in float vA; in vec3 vW; uniform sampler2D uLightMap; uniform float uLightHalf;
+        in float vA; in vec3 vW; in float vRot, vKind; uniform sampler2D uLightMap; uniform float uLightHalf;
         #include <logdepthbuf_pars_fragment>
         void main(){
           #include <logdepthbuf_fragment>
           if (vA < 0.5) discard;
           vec2 q = gl_PointCoord*2.0 - 1.0; float r = dot(q, q); if (r > 1.0) discard;
+          // six-armed ice crystal (dendrite or plate), slowly tumbling; tiny far flakes stay soft dots
+          float rr = sqrt(r), th = atan(q.y, q.x) + vRot;
+          float a6 = abs(fract(th/1.0472 + 0.5) - 0.5)*1.0472;               // angle to the nearest arm
+          float arm = smoothstep(0.09, 0.0, sin(a6)*rr) * smoothstep(1.0, 0.85, rr);
+          float side = abs(fract(rr*(vKind > 0.5 ? 4.0 : 3.0)) - 0.5);        // side branches along each arm
+          float br = smoothstep(0.08, 0.0, abs(sin(a6 - 0.52)*rr - 0.0) * 0.6 + side*0.12) * step(0.25, rr) * smoothstep(0.95, 0.7, rr);
+          float hub = smoothstep(0.22, 0.1, rr);
+          float flake = clamp(max(max(arm, br*0.8), hub), 0.0, 1.0);
+          float px = fwidth(rr);                                              // flake size on screen
+          flake = mix(1.0 - rr*0.5, flake, smoothstep(0.25, 0.08, px));         // small: dot; large: crystal
+          if (flake < 0.05) discard;
           vec3 amb = skyL(vec3(0.0,1.0,0.0))*1.1 + (uSunE*max(uSunDir.y,0.0) + uMoonE*max(uMoonDir.y,0.0))*uExposure*0.25;
           vec2 luv = vW.xz/(2.0*uLightHalf) + 0.5; vec3 lm = vec3(0.0);
           if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0) lm = texture(uLightMap, luv).rgb * 40.0 * uExposure * uNight * 0.3;
-          gl_FragColor = vec4((amb*0.6 + lm + vec3(0.9)*uFlash.w*0.003) * (1.0 - r*0.5), 0.85);
+          gl_FragColor = vec4((amb*0.6 + lm + vec3(0.9)*uFlash.w*0.003) * flake, 0.85*min(1.0, flake*1.3));
         }`,
     }));
     this.snow.frustumCulled = false;
@@ -83,7 +96,9 @@ export class Precip {
   }
   set(type, rate, wind) {
     // rate mm/h -> fraction of particles shown
-    const f = type === 'none' ? 0 : Math.min(1, 0.06 + Math.sqrt(rate) * 0.35);
+    // rain: light < 2.5 mm/h, moderate 2.5-7.6, heavy above; snow (water equivalent): light < 0.5, moderate 0.5-1.5, heavy above
+    const lvl = type === 'snow' ? rate / 0.5 : rate / 2.5;   // 1 = top of "light"
+    const f = type === 'none' || rate <= 0 ? 0 : Math.min(1, lvl < 1 ? 0.06 + 0.24 * lvl : lvl < 3 ? 0.3 + 0.3 * (lvl - 1) / 2 : 0.6 + 0.4 * Math.min(1, (lvl - 3) / 3));
     this.U.uPrecipRate.value = f;
     this.rain.visible = type === 'rain' || type === 'freezing';
     this.snow.visible = type === 'snow';
@@ -96,11 +111,42 @@ export class Lightning {
   constructor(U, audio) {
     this.U = U; this.audio = audio; this.events = []; this.next = 0; this.rate = 0; this.cells = [];
     this.group = new THREE.Group();
+    // bolts: each channel segment is a camera-facing ribbon (at least ~2 px wide), bright core with a soft edge
     this.boltMat = new THREE.ShaderMaterial({
-      uniforms: { ...U, uI: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-      vertexShader: '#include <common>\n#include <logdepthbuf_pars_vertex>\nvoid main(){ gl_Position = projectionMatrix*viewMatrix*modelMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
-      fragmentShader: 'uniform float uI, uExposure;\n#include <logdepthbuf_pars_fragment>\nvoid main(){\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(vec3(0.8,0.85,1.0)*min(uI, 3.0e4), 1.0); }',
+      uniforms: { ...U, uI: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      vertexShader: '#include <common>\nattribute vec3 aB; attribute vec2 aSE; uniform float uPxSr; out float vS;\n#include <logdepthbuf_pars_vertex>\nvoid main(){ vec3 A = position, B = aB; vec3 P = mix(A, B, aSE.y); vec3 dir = normalize(B - A + 1e-4); vec3 vd = normalize(P - cameraPosition); vec3 sd = normalize(cross(dir, vd) + 1e-5); float d = length(P - cameraPosition); float w = max(3.0, 2.5*d*sqrt(uPxSr)); vS = aSE.x; P += sd*aSE.x*w*0.5; gl_Position = projectionMatrix*viewMatrix*vec4(P, 1.0);\n#include <logdepthbuf_vertex>\n}',
+      fragmentShader: 'in float vS; uniform float uI, uExposure;\n#include <logdepthbuf_pars_fragment>\nvoid main(){\n#include <logdepthbuf_fragment>\n float c = exp(-vS*vS*3.0); gl_FragColor = vec4(vec3(0.8,0.85,1.0)*min(uI, 3.0e4)*c, 1.0); }',
     });
+  }
+  // segments [x0,y0,z0,x1,y1,z1,...] -> ribbon mesh
+  ribbon(segs) {
+    const n = segs.length / 6, pos = new Float32Array(n * 12), bb = new Float32Array(n * 12), se = new Float32Array(n * 8), idx = [];
+    for (let k = 0; k < n; k++) {
+      const a = segs.slice(k * 6, k * 6 + 3), b = segs.slice(k * 6 + 3, k * 6 + 6);
+      [[-1, 0], [1, 0], [-1, 1], [1, 1]].forEach(([sd, e], v) => { pos.set(a, (k * 4 + v) * 3); bb.set(b, (k * 4 + v) * 3); se.set([sd, e], (k * 4 + v) * 2); });
+      const o = k * 4; idx.push(o, o + 1, o + 2, o + 1, o + 3, o + 2);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('aB', new THREE.BufferAttribute(bb, 3)); g.setAttribute('aSE', new THREE.BufferAttribute(se, 2)); g.setIndex(idx);
+    const m = new THREE.Mesh(g, this.boltMat); m.frustumCulled = false; return m;
+  }
+  // in-cloud "spider" lightning crawling along the underside of the cloud deck (seen from below)
+  spider(x, z, base) {
+    const segs = [];
+    const grow = (p, ang, len, depth) => {
+      let cur = p.slice();
+      for (let k = 0; k < len; k++) {
+        ang += (Math.random() - 0.5) * 0.9;
+        const step = 150 + Math.random() * 250, nx = [cur[0] + Math.cos(ang) * step, base - 60 + (Math.random() - 0.5) * 80, cur[2] + Math.sin(ang) * step];
+        segs.push(...cur, ...nx);
+        if (depth < 2 && Math.random() < 0.18) grow(nx, ang + (Math.random() < 0.5 ? 1 : -1) * (0.5 + Math.random()), 4 + Math.random() * 10, depth + 1);
+        cur = nx;
+      }
+    };
+    const a0 = Math.random() * 6.283;
+    grow([x, base - 60, z], a0, 15 + Math.random() * 20, 0);
+    grow([x, base - 60, z], a0 + Math.PI, 8 + Math.random() * 15, 0);
+    return this.ribbon(segs);
   }
   // cells: [{x, z, top, strength}] in metres; rate: flashes per minute in total
   setStorms(cells, ratePerMin) { this.cells = cells; this.rate = ratePerMin; }
@@ -117,8 +163,7 @@ export class Lightning {
       }
     };
     grow(p, 200, 0);
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
-    const m = new THREE.LineSegments(g, this.boltMat); m.frustumCulled = false; return m;
+    return this.ribbon(segs);
   }
   update(dt, now, camPos, heightAt) {
     const U = this.U;
@@ -131,6 +176,7 @@ export class Lightning {
       const strokes = cg ? 2 + Math.floor(Math.random() * 3) : 1 + Math.floor(Math.random() * 2);
       const ev = { x, y, z, t0: now, strokes, cg, I: 0.6 + Math.random() };
       if (cg) { ev.mesh = this.bolt(x, z, c.base || 1500, heightAt(x, z)); this.group.add(ev.mesh); }
+      else if (Math.random() < 0.35) { ev.mesh = this.spider(x, z, c.base || 1500); this.group.add(ev.mesh); }
       this.events.push(ev);
       const dist = Math.hypot(x - camPos.x, y - camPos.y, z - camPos.z);
       if (this.audio) this.audio.thunder(dist, cg, ev.I);
@@ -273,11 +319,12 @@ export class FarStorms {
       if (now > s.next) { s.next = now + (-Math.log(Math.random())) / (0.4 + s.strength * 2.5); s.flashT = now; s.flashI = 0.2 + Math.random(); s.mesh.material.uniforms.uGlow.value.set((Math.random() - 0.5) * 1.2, 0.25 + Math.random() * 0.5); }
       const f = s.flashT ? Math.exp(-(now - s.flashT) / 0.06) * s.flashI : 0;
       s.mesh.material.uniforms.uI.value = f * s.strength;
-      // sprites: large systems produce one every few seconds to a minute (shown a little more often than real)
-      if (spriteMode && night && s.strength > 0.15) {
+      // sprites: whenever a strong storm is in view on a dark night (local clouds still hide them). Large systems
+      // produce one every few seconds to a minute; the sprite mode shows them a little more often than real.
+      if (night && s.strength > 0.15) {
         if (!s.nextSprite) s.nextSprite = now + 1 + Math.random() * 3;
         if (now > s.nextSprite) {
-          const rate = 0.15 * s.strength * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
+          const rate = (spriteMode ? 0.15 : 0.05) * s.strength * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
           s.nextSprite = now + (-Math.log(Math.random())) / rate;
           s.flashT = now; s.flashI = 1.6;                      // the parent +CG stroke lights the cloud
           this.spawnSprite(s, now);

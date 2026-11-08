@@ -204,8 +204,15 @@ export class Immersive {
     this.structures.dispose(); this.structures = null; if (this.U.uLightMap) this.U.uLightMap.value = null; if (this.U.uSportsMap) this.U.uSportsMap.value = null;
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; if (this.grass) { this.grass.exclude = null; this.grass.center = null; } }
   }
-  setFarStorms(list) { this.farStorms.setForecast(null); this.farStorms.set(list || []); }
-  setStormForecast(data) { this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); this.updateLabels(); }
+  setFarStorms(list) { this.farAuto = null; this.farStorms.setForecast(null); this.farStorms.set(list || []); }
+  // storms found on the satellite image when the view opened: shown while the time is within 3 h of the image
+  setFarAuto(a) { this.farAuto = a; this.farStormsSet = false; this.farStorms.setForecast(null); if (a) this.applyFarAuto(); else this.farStorms.set([]); }
+  applyFarAuto() {
+    if (!this.farAuto || this.farStorms.forecast) return;
+    const ok = Math.abs(this.unix * 1000 - this.farAuto.obs) < 3 * 3600e3;
+    if (ok !== this.farAutoShown || !this.farStormsSet) { this.farStorms.set(ok ? this.farAuto.list : []); this.farAutoShown = ok; this.farStormsSet = true; }
+  }
+  setStormForecast(data) { this.farAuto = null; this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); this.updateLabels(); }
 
   // ---------- time ----------
   setTime(date, force) {
@@ -238,7 +245,7 @@ export class Immersive {
     this.applyWeather(force);
     this.applyTimeDependent();
     this.applyAurora(); this.dateSetAt = performance.now();
-    if (this.farStorms.forecast) this.farStorms.atTime(this.unix);
+    if (this.farStorms.forecast) this.farStorms.atTime(this.unix); else this.applyFarAuto();
     this.updateLabels();
   }
   // Auroral oval from the planetary Kp index at this time (observed, or NOAA's 3-day forecast).
