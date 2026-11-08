@@ -62,11 +62,32 @@ function satComplexes(ir, G) {
     // sprite-capable only for big, very deep complexes (MCS); smaller cold areas are ordinary storms
     const mcs = area >= 30000 && minT <= -62 ? Math.sqrt(clamp((area - 30000) / 90000, 0, 1)) * clamp((-minT - 60) / 15, 0, 1) : 0;
     const gridCells = new Set(ll.map(p => nearestIdx(G, p[0], p[1])).filter(k => k >= 0));   // which 120 km cells it covers
-    out.push({ la, lo, area, minT, mcs, gridCells, convective: minT <= -55 });
+    // warmest ground the satellite sees within ~300 km (clear patches read close to the surface temperature)
+    let i0 = n, i1 = 0, j0 = n, j1 = 0; for (const c of cells) { const ci = c % n, cj = (c / n) | 0; i0 = Math.min(i0, ci); i1 = Math.max(i1, ci); j0 = Math.min(j0, cj); j1 = Math.max(j1, cj); }
+    // a robust reading (95th percentile), so a single bad pixel can't pass for warm ground
+    const vals = [];
+    for (let j = Math.max(0, j0 - 30); j <= Math.min(n - 1, j1 + 30); j += 2) for (let i = Math.max(0, i0 - 30); i <= Math.min(n - 1, i1 + 30); i += 2) { const v = T[j * n + i]; if (isFinite(v)) vals.push(v); }
+    vals.sort((a, b) => a - b);
+    const warmT = vals.length ? vals[Math.floor(vals.length * 0.95)] : -99;
+    out.push({ la, lo, area, minT, mcs, gridCells, warmT, convective: minT <= -55 });
   }
   return out;
 }
 
+// Storm support: cold tops alone can be winter jet-stream cirrus or a frontal cloud shield, which don't rain hard,
+// thunder or make sprites. They count as a storm only with storm conditions in the primary forecast nearby
+// (instability, thunder or a lightning signal) or warm air near the ground (clear ground the satellite sees within
+// ~300 km reads 12 C or more at the 95th percentile, as in summer or the tropics). Without the primary forecast
+// (backup only, or none), warm ground alone decides.
+export const WARM_GROUND_C = 12;
+function forecastSupport(wx, cells, t) {
+  if (!wx) return false;
+  for (const k of cells) {
+    const S = wx[k]; if (!S || S.backup) continue;   // instability (CAPE) is only in the primary forecast; with the backup, warm ground alone decides
+    if ((val(S, 'cape', t) ?? 0) >= 150 || (val(S, 'weather_code', t) ?? 0) >= 95 || (val(S, 'lightning_potential', t) ?? 0) > 0) return true;
+  }
+  return false;
+}
 const nearestIdx = (G, la, lo) => { let best = -1, bd = 1e18; for (let k = 0; k < G.pts.length; k++) { const d = (G.pts[k][0] - la) ** 2 + ((G.pts[k][1] - lo) * Math.cos(la * Math.PI / 180)) ** 2; if (d < bd) { bd = d; best = k; } } return best; };
 
 // home: [lat, lon]; hours: unix seconds; opts.models: 'fetch' (may use the free forecast quota) | 'cache' (only what is
@@ -113,7 +134,8 @@ export async function spriteStormField(home, hours, opts = {}, progress = () => 
       model.push(c);
     }
     // satellite complexes mapped onto the grid
-    const satCl = useSat ? sat.complexes.filter(x => x.convective && x.area >= 2500) : [];
+    const ringK = ks => { const r = new Set(); for (const m of ks) { const i = m % N, j = (m / N) | 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const ii = i + a, jj = j + b; if (ii >= 0 && jj >= 0 && ii < N && jj < N) r.add(at(ii, jj)); } } return r; };
+    const satCl = useSat ? sat.complexes.filter(x => x.convective && x.area >= 2500 && (x.warmT >= WARM_GROUND_C || forecastSupport(wx, ringK(x.gridCells), t))) : [];
     const near = (a, b, km) => haversine(a.la, a.lo, b.la, b.lo) / 1000 < km;
     // a satellite complex matches a model cluster when it covers one of its cells or a neighbouring cell (~120 km)
     const ring = c => { const r = new Set(); for (const m of c.cells) { const i = m % N, j = (m / N) | 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const ii = i + a, jj = j + b; if (ii >= 0 && jj >= 0 && ii < N && jj < N) r.add(at(ii, jj)); } } return r; };
@@ -165,7 +187,20 @@ export async function spriteStormField(home, hours, opts = {}, progress = () => 
       // coldest top within ~20 km: under an anvil it rains; very cold (deep) tops mean heavy convective rain and lightning
       const d = 0.18, cs = Math.cos(la * Math.PI / 180);
       for (const [a, b] of [[0, 0], [d, 0], [-d, 0], [0, d / cs], [0, -d / cs]]) { const T = sat.sample(la + a, lo + b); if (isFinite(T)) satT = isFinite(satT) ? Math.min(satT, T) : T; }
-      if (satT <= -50) satS = clamp((-satT - 50) / 18, 0, 1);
+      if (satT <= -50) {
+        // storm support here: forecast instability/thunder in this or a neighbouring cell, or warm clear ground nearby
+        let ok = forecastSupport(wx, k >= 0 ? (() => { const r = []; const i = k % N, j = (k / N) | 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const ii = i + a, jj = j + b; if (ii >= 0 && jj >= 0 && ii < N && jj < N) r.push(at(ii, jj)); } return r; })() : [], hours[hb]);
+        if (!ok) {
+          const vals = [];
+          for (const rKm of [50, 100, 150, 200, 250, 300]) for (let q = 0; q < 16; q++) {
+            const a = q / 16 * 2 * Math.PI, T = sat.sample(la + rKm / 111 * Math.cos(a), lo + rKm / 111 / Math.max(0.2, cs) * Math.sin(a));
+            if (isFinite(T)) vals.push(T);
+          }
+          vals.sort((a, b) => a - b);
+          ok = vals.length > 10 && vals[Math.floor(vals.length * 0.95)] >= WARM_GROUND_C;   // 95th percentile, not one pixel
+        }
+        if (ok) satS = clamp((-satT - 50) / 18, 0, 1);
+      }
     }
     const seen = isFinite(satT) && satT <= -45;     // the satellite sees cold, high cloud here
     // Accuracy first: the satellite is an observation, so where it applies its storm overrides a dry point forecast
@@ -175,7 +210,7 @@ export async function spriteStormField(home, hours, opts = {}, progress = () => 
     if (kind === 'primary+sat') strength = Math.max(satS, seen ? model * 0.6 : 0);
     else if (kind === 'backup+sat' || kind === 'sat') strength = satS;
     else strength = 0;
-    return { strength, thunder: strength >= 0.45 || satT <= -58, kind, satT };
+    return { strength, thunder: strength >= 0.45 || (satS > 0 && satT <= -58), kind, satT };
   };
   return { stormsByHour, grid: G, wx, config: describe(perHour, modelKind, sat, hours), modelKind, sat: sat && { obs: sat.obs, name: sat.name }, stormAt };
 }
