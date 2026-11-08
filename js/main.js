@@ -79,23 +79,27 @@ function updateOffline() {
   let txt = '';
   if (!Net.online) txt = `You're offline — showing the last data saved ${Net.lastOnline ? fmtAgo(Net.lastOnline) : ''}`;
   else if (w > 0) {
-    const head = `Free 7-model weather limit reached · back in ${fmtWait(w)}`;
+    const head = `Free 7-model weather limit reached · trying again in ${fmtWait(w)}`;
     if (P && P.backup) txt = `${head} — using the lower-quality backup forecast (${P.models.map(m => m === 'nws' ? 'US NWS' : 'MET Norway').join(' + ')})`;
     else if (P && P.stale) txt = `${head} — showing the forecast saved ${fmtAgo(P.fetched)}`;
     else if (P) txt = `${head} — this forecast was saved ${fmtAgo(P.fetched)}`;
     else txt = `${head} — new forecasts use a lower-quality backup until then`;
-  } else if (P && P.backup) txt = 'The full 7-model forecast is available again — tap here to update this place';
+  } else if (P && P.backup) txt = 'Tap here to try the full 7-model forecast again';
   else if (P && P.stale) txt = `Couldn't reach the forecast servers — showing data from ${fmtAgo(P.fetched)}`;
-  b.textContent = txt; b.classList.toggle('hidden', !txt);
+  // phones: a small chip that opens to the full text when tapped, so it never covers much of the screen
+  const short = !Net.online ? '⚠ Offline · saved data' : w > 0 ? `⚠ ${P && P.backup ? 'Backup weather' : 'Weather limit'} · ${fmtWait(w)}` : P && P.backup ? '↻ Full forecast' : P && P.stale ? '⚠ Saved data' : '';
+  const phone = matchMedia('(max-width: 820px), (max-height: 520px) and (pointer: coarse)').matches;
+  b.textContent = phone && !b.classList.contains('open') ? short : txt; b.classList.toggle('hidden', !txt); b.classList.toggle('chip', phone);
   const canUpgrade = Net.online && w === 0 && P && P.backup;
   b.classList.toggle('tap', !!canUpgrade);
-  b.onclick = canUpgrade ? async () => {
+  b.onclick = !canUpgrade ? (phone ? () => { b.classList.toggle('open'); updateOffline(); } : null) : async () => {
     const tok = selToken, { lat, lon } = S.sel; b.textContent = 'Loading 7 weather models…';
     try { const [point, aq] = await Promise.all([pointForecast(lat, lon), airQuality(lat, lon)]); if (tok === selToken) await showForecast(tok, point, aq); }
     catch { updateOffline(); }
-  } : null;
+  };
 }
 setInterval(updateOffline, 30e3);
+addEventListener('resize', () => updateOffline());
 
 // ---------------- UI wiring ----------------
 function setupUI() {
@@ -190,7 +194,7 @@ function updateFetchButton() {
     const w = RateLimit.waitMs();
     if (w > 0) {
       const sec = Math.ceil(w / 1000), txt = sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
-      b.disabled = false; b.textContent = `Fetch backup forecast (lower quality) · full 7-model forecast back in ${txt}`;
+      b.disabled = false; b.textContent = `Fetch backup forecast (lower quality) · trying the full 7-model forecast again in ${txt}`;
     } else {
       const left = Math.floor(RateLimit.remaining() / POINT_WEIGHT);
       b.disabled = false; b.textContent = `Fetch forecast · about ${left} left before the free limit`;
@@ -295,7 +299,7 @@ function renderConditions() {
   box.innerHTML = `
     <div class="place">${S.sel.name}</div>
     <div class="sub">${d.lat.toFixed(4)}, ${d.lon.toFixed(4)} · ${U.m(P.elevation)} · ${P.backup ? 'Backup forecast' : `${P.models.length} models`}: ${P.models.map(m => MODEL_NAMES[m]).join(', ')}</div>
-    ${P.backup ? `<div class="warnbox small">Lower-quality backup: the free 7-model service's limit is used up (back in ${fmtWait(RateLimit.waitMs())}). ${P.models.length} source${P.models.length > 1 ? 's' : ''} instead of 7, cloud layers only as low/mid/high, no instability data for storms${P.filled && P.filled.length ? `; cloud heights, snow depth and storm data come from the 7-model forecast saved ${fmtAgo(P.savedAt)}` : ', no snow depth'}.</div>` : ''}
+    ${P.backup ? `<div class="warnbox small">Lower-quality backup: the free 7-model service's limit is used up (it is tried again in ${fmtWait(RateLimit.waitMs())}). ${P.models.length} source${P.models.length > 1 ? 's' : ''} instead of 7, cloud layers only as low/mid/high, no instability data for storms${P.filled && P.filled.length ? `; cloud heights, snow depth and storm data come from the 7-model forecast saved ${fmtAgo(P.savedAt)}` : ', no snow depth'}.</div>` : ''}
     <div class="score"><div class="num" style="color:${colorFor(ns.score / 100)}">${ns.score}</div>
       <div><b>Astrophotography tonight</b><div class="small muted">${(ns.clear * 100).toFixed(0)}% clear in the dark hours · ${night.darkHours.toFixed(1)} h moon-free darkness${sqm ? ` · Bortle ${bortle(sqm)}` : ''}</div></div></div>
     <button class="btn primary big" id="open3dBtn">Open 3D sky view</button>

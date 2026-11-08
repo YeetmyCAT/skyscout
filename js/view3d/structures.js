@@ -811,17 +811,20 @@ export class Structures {
   buildLamps(osm) {
     const poles = [];
     const LED = [235, 235, 255], HPS = [255, 170, 80];
-    const addLamp = (x, z, mapped) => {
+    // ang: which way the arm points (rotation about the vertical); the light shines from the arm's tip
+    const addLamp = (x, z, mapped, ang) => {
       const led = hash(Math.round(x * 3.1 + z * 7.7)) < this.ctx.ledShare;
-      const y = this.h(x, z);
-      this.lamps.push({ x, z, y: y + 8.5, cd: led ? 2200 : 1800, r: 24, i: led ? 0.65 : 0.75, c: led ? LED : HPS, cc: led ? [0.95, 0.95, 1] : [1, 0.62, 0.28], mapped });
-      poles.push([x, y, z]); this.col.circles.push({ x, z, r: 0.35, top: y + 8.6 });
+      const y = this.h(x, z), hx = x + Math.cos(ang) * 1.45, hz = z - Math.sin(ang) * 1.45;
+      this.lamps.push({ x: hx, z: hz, y: y + 8.4, cd: led ? 2200 : 1800, r: 24, i: led ? 0.65 : 0.75, c: led ? LED : HPS, cc: led ? [0.95, 0.95, 1] : [1, 0.62, 0.28], mapped });
+      poles.push([x, y, z, ang]); this.col.circles.push({ x, z, r: 0.35, top: y + 8.6 });
     };
-    for (const l of osm.lamps) { const [x, y] = this.local.toXY(l.p[0], l.p[1]); addLamp(x, -y, true); }
+    for (const l of osm.lamps) { const [x, y] = this.local.toXY(l.p[0], l.p[1]); addLamp(x, -y, true, hash(Math.round(x * 13.7 - y * 5.3)) * 6.2832); }
     // estimated lamps along urban or lit roads where none are mapped
     if (this.ctx.estimateLamps) {
       const half = this.ctx.detail * 2.4;
-      const mappedNear = osm.lamps.length;
+      // skip only where a mapped lamp already stands within ~30 m (mapping is patchy: some streets done, most not)
+      const mg = new Set(); for (const l of this.lamps) if (l.mapped) mg.add(Math.floor(l.x / 30) + ',' + Math.floor(l.z / 30));
+      const mappedAt = (x, z) => { const i = Math.floor(x / 30), j = Math.floor(z / 30); for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (mg.has((i + a) + ',' + (j + b))) return true; return false; };
       // Guessed lamps only on paved town and suburban streets and highways (or roads mapped lit=yes). Never on
       // alleys, service lanes, driveways, tracks, unpaved roads or rural roads, which are mostly unlit.
       const UNPAVED = /unpaved|gravel|dirt|ground|grass|sand|compacted|earth|mud|pebble|wood|rock|clay/;
@@ -831,14 +834,14 @@ export class Structures {
         const pts = ringLocalLine(this.local, r.line);
         const mid = pts[pts.length >> 1], urban = Math.max(this.ctx.urbanAt(pts[0][0], pts[0][1]), this.ctx.urbanAt(mid[0], mid[1]));
         if (!r.lit && urban < 0.45) continue;
-        if (mappedNear > 50 && !r.lit) continue;
         const big = /^(motorway|trunk)/.test(r.kind), sp = r.kind === 'residential' ? 45 : big ? 55 : 38, off = r.kind === 'residential' ? 4.5 : big ? 14 : /primary/.test(r.kind) ? 9 : 7;   // poles beside the carriageway
         let acc = hash(pts.length) * sp, side = 1;
         for (let i = 0; i < pts.length - 1; i++) {
           const a = pts[i], b = pts[i + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (!L) continue;
           for (let s = acc; s < L; s += sp) {
-            const x = a[0] + (b[0] - a[0]) * s / L - (b[1] - a[1]) / L * off * side, z = a[1] + (b[1] - a[1]) * s / L + (b[0] - a[0]) / L * off * side;
-            if (Math.abs(x) < half && Math.abs(z) < half) addLamp(x, z, false);
+            const ox = -(b[1] - a[1]) / L * side, oz = (b[0] - a[0]) / L * side;   // unit vector from the road out to the pole
+            const x = a[0] + (b[0] - a[0]) * s / L + ox * off, z = a[1] + (b[1] - a[1]) * s / L + oz * off;
+            if (Math.abs(x) < half && Math.abs(z) < half && !mappedAt(x, z)) addLamp(x, z, false, Math.atan2(oz, -ox));   // arm reaches back over the road
             side = r.kind === 'residential' ? -side : side;
           }
           acc = ((acc - L) % sp + sp) % sp;
@@ -849,7 +852,7 @@ export class Structures {
       const pole = mergeGeos([new THREE.CylinderGeometry(0.08, 0.12, 8.6, 5).translate(0, 4.3, 0), new THREE.BoxGeometry(1.6, 0.15, 0.3).translate(0.75, 8.5, 0)]);
       pole.setAttribute('aInfo', new THREE.Float32BufferAttribute(new Float32Array(pole.attributes.position.count * 4), 4));
       const im = new THREE.InstancedMesh(pole, plainLit(this.U, 0x555555), poles.length);
-      const M = new THREE.Matrix4(); poles.forEach((p, i) => { M.makeRotationY(hash(i) * 6.28); M.setPosition(p[0], p[1], p[2]); im.setMatrixAt(i, M); });
+      const M = new THREE.Matrix4(); poles.forEach((p, i) => { M.makeRotationY(p[3]); M.setPosition(p[0], p[1], p[2]); im.setMatrixAt(i, M); });
       im.frustumCulled = false; this.group.add(im);
     }
   }
@@ -978,10 +981,11 @@ export class Structures {
   // on pavement or right beside a road; lamps of mapped lit sports fields and power plants are always shown.
   buildAreas(osm) {
     const half = this.ctx.detail * 2.4, poles = [], est = this.ctx.estimateLamps;
-    const lamp = (x, z, h, cd, cc) => { const g = this.h(x, z); this.lamps.push({ x, z, y: g + h, cd, r: 1, i: 0, c: [0, 0, 0], cc }); poles.push([x, g, z, h]); this.col.circles.push({ x, z, r: 0.3, top: g + h }); };
+    // each lamp lights a pool of ground around its pole (no uniform wash over the whole area)
+    const lamp = (x, z, h, cd, cc) => { const g = this.h(x, z); this.lamps.push({ x, z, y: g + h, cd, r: h * 2.2, i: 0.55, c: cc.map(v => v * 255), cc }); poles.push([x, g, z, h]); this.col.circles.push({ x, z, r: 0.3, top: g + h }); };
     const addArea = (ring, lux, c, lampEvery, lampCd, lampC, opt = {}) => {
       const p = ringLocal(this.local, ring); if (p.length < 3 || !p.some(([x, z]) => Math.abs(x) < half * 2 && Math.abs(z) < half * 2)) return;
-      this.areas.push({ ring: p, c: c.map(v => Math.min(255, v * lux / 40)) });
+      if (lux > 0) this.areas.push({ ring: p, c: c.map(v => Math.min(255, v * lux / 40)) });
       if (!lampEvery) return;
       if (opt.edges) {   // floodlight masts around a lit sports field
         const step = Math.max(1, Math.floor(p.length / 6));
@@ -996,9 +1000,9 @@ export class Structures {
         lamp(x, z, opt.h || 12, lampCd, lampC); n++;
       }
     };
-    for (const a of osm.industrial) if (a.plant || est) addArea(a.ring, a.plant ? 18 : 6, [255, 170, 90], a.plant ? 60 : 110, a.plant ? 9000 : 4000, [1, 0.62, 0.3], { nearRoad: !a.plant });
+    for (const a of osm.industrial) if (a.plant || est) addArea(a.ring, 0, [255, 170, 90], a.plant ? 60 : 110, a.plant ? 9000 : 4000, [1, 0.62, 0.3], { nearRoad: !a.plant });
     for (const a of osm.lit) addArea(a.ring, 25, [240, 240, 255], 70, 30000, [0.95, 0.95, 1], { edges: true });
-    for (const a of osm.parking) addArea(a.ring, est ? 8 : 0, [235, 235, 255], est ? 35 : 0, 2500, [0.95, 0.95, 1], { h: 9 });
+    for (const a of osm.parking) addArea(a.ring, 0, [235, 235, 255], est ? 35 : 0, 2500, [0.95, 0.95, 1], { h: 9 });
     for (const f of osm.fuel) if (f.ring) addArea(f.ring, 120, [245, 245, 255], 0, 0); else { const [x, y] = this.local.toXY(f.p[0], f.p[1]); const g = this.h(x, -y); this.lamps.push({ x, z: -y, y: g + 5, cd: 15000, r: 30, i: 1, c: [245, 245, 255], cc: [0.95, 0.95, 1] }); poles.push([x, g, -y, 5]); }
     if (poles.length) {
       const geo = new THREE.CylinderGeometry(0.07, 0.11, 1, 5).translate(0, 0.5, 0);

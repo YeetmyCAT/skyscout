@@ -276,7 +276,7 @@ export function distantLights(U, lights, local, heightAt, excludeHalf, mobile, r
   let seed = 1;
   for (let i = 0; i < P.length && pos.length / 3 < max; i += 5) {
     if (P[i + 3] > 45) continue;
-    if (roads && P[i + 4] < 3) continue;   // dim pixels: unlit rural roads and the glow spilling around towns
+    if (P[i + 4] < (roads ? 3 : 12)) continue;   // dim pixels: unlit rural roads and glow spilling around towns (without a road map, only clearly urban pixels)
     const [x, y] = local.toXY(P[i], P[i + 1]), z = -y;
     if (Math.abs(x) < excludeHalf && Math.abs(z) < excludeHalf) continue;
     const nL = Math.min(40, Math.floor(P[i + 2] / per + hash(seed++)));

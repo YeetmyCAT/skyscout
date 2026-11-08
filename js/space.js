@@ -16,12 +16,14 @@ export async function loadKp() {
       const r = await cachedJSON('kp:' + u.slice(-30), u, 30 * 60e3, { timeout: 15000 });
       for (const row of r.data) {
         if (Array.isArray(row)) { if (row[0] === 'time_tag') continue; out.push({ t: Date.parse(row[0] + 'Z'), kp: +row[1] }); }
-        else if (row && row.time_tag) out.push({ t: Date.parse(row.time_tag + 'Z'), kp: +row.kp });
+        else if (row && row.time_tag) out.push({ t: Date.parse(row.time_tag + 'Z'), kp: +(row.kp ?? row.Kp) });   // the observed feed spells it 'Kp', the forecast 'kp'
       }
     } catch { }
   }
   out.sort((a, b) => a.t - b.t);
-  kpCache = out.filter(x => isFinite(x.kp) && isFinite(x.t));
+  // one value per 3-hour slot (both feeds overlap): keep the first, i.e. the observed one
+  const seen = new Set();
+  kpCache = out.filter(x => isFinite(x.kp) && isFinite(x.t) && !seen.has(x.t) && seen.add(x.t));
   return kpCache;
 }
 export function kpAt(list, ms) {
@@ -31,8 +33,11 @@ export function kpAt(list, ms) {
 }
 // Oval equatorward edge (magnetic latitude, deg), width and peak brightness (kR) for a Kp value.
 export function auroraParams(kp) {
-  const edge = 66.5 - 2.15 * kp, width = 4 + 0.9 * kp, kR = 2.5 * Math.pow(10, kp / 4);
-  return { edge, width, kR, red: Math.max(0, (kp - 4) / 5) };
+  // magnetic latitude of the main (brightest, poleward-border) arcs: ~64 deg at Kp 3, ~59 deg at Kp 6, ~54.6 deg at Kp 9.
+  // At Kp 3 that leaves only a faint glow a few degrees above the northern horizon at ~55 deg (Upper Michigan),
+  // aurora high up near Fairbanks (~65 deg). Brightness rises from a few kR when quiet to ~250 kR in severe storms.
+  const center = 69 - 1.6 * kp, kR = 1.5 * Math.pow(10, kp / 4);
+  return { center, edge: center, kR, red: Math.max(0, Math.min(1, (kp - 4) / 5)) };
 }
 // IGRF-2025 dipole north pole (geographic)
 export const MAG_POLE = { lat: 80.8, lon: -72.7 };
@@ -44,6 +49,52 @@ export function ecef(lat, lon, hKm = 0) {
 export function enuBasis(lat, lon) {
   const a = lat * DEG, b = lon * DEG;
   return { e: [-Math.sin(b), Math.cos(b), 0], n: [-Math.sin(a) * Math.cos(b), -Math.sin(a) * Math.sin(b), Math.cos(a)], u: [Math.cos(a) * Math.cos(b), Math.cos(a) * Math.sin(b), Math.sin(a)] };
+}
+// ---- Probability of aurora (0-100 %, NOAA OVATION style) on a 1-degree grid: index (lat + 90) * 360 + (lon mod 360) ----
+// Live OVATION nowcast from NOAA SWPC (valid about the next hour), cached for 10 minutes.
+export async function loadOvation() {
+  try {
+    const r = await cachedJSON('ovation', 'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json', 10 * 60e3, { timeout: 20000, quiet: true });
+    const g = new Uint8Array(360 * 181);
+    for (const [lo, la, v] of r.data.coordinates) g[(la + 90) * 360 + ((lo % 360) + 360) % 360] = Math.min(100, v);
+    return { t: Date.parse(r.data['Forecast Time']), grid: g, live: true };
+  } catch { return null; }
+}
+// Stand-in for other times, fitted to OVATION: at Kp 3 the night-side peak is ~18 % near 70 deg magnetic latitude
+// (10 % from ~66 deg); the oval moves equatorward and the chances rise with Kp (~64 % peak at Kp 6, ~100 % from Kp 7).
+// The day side is ~3.5 deg further poleward and much weaker.
+export function synthAurora(kp, ms) {
+  const g = new Uint8Array(360 * 181), utcH = (ms / 3600e3) % 24;
+  // severe storms push the oval much further than the linear trend (Kp saturates at 9: May 2024 reached ~45 deg)
+  const Cm = 75 - 1.7 * kp - 0.6 * Math.max(0, kp - 6) ** 2, w = 3 + 0.6 * kp, pmax = Math.min(100, 5 * Math.pow(10, kp / 5.4));
+  const A = ecef(MAG_POLE.lat, MAG_POLE.lon, -6370);
+  const n = Math.hypot(...A); A[0] /= n; A[1] /= n; A[2] /= n;
+  for (let la = -90; la <= 90; la++) {
+    const cl = Math.cos(la * DEG), sl = Math.sin(la * DEG);
+    for (let lo = 0; lo < 360; lo++) {
+      const ml = Math.abs(Math.asin(cl * Math.cos(lo * DEG) * A[0] + cl * Math.sin(lo * DEG) * A[1] + sl * A[2])) / DEG;
+      const lt = (utcH + (lo > 180 ? lo - 360 : lo) / 15 + 24) % 24, f = (1 + Math.cos(2 * Math.PI * lt / 24)) / 2;   // 1 at midnight
+      const c = Cm + 3.5 * (1 - f), pm = pmax * (0.25 + 0.75 * f);
+      g[(la + 90) * 360 + lo] = Math.round(pm * Math.exp(-(((ml - c) / w) ** 2)));
+    }
+  }
+  return { t: ms, grid: g, live: false };
+}
+// Arc placement for an observer: probability-weighted magnetic latitude of the oval in their sector, its spread,
+// and the highest chance within ~2000 km.
+export function auroraOval(grid, lat, lon) {
+  let sw = 0, sm = 0, sm2 = 0, near = 0;
+  const hemi = lat >= 0 ? 1 : -1;
+  for (let la = 40 * hemi; Math.abs(la) <= 89; la += hemi) for (let dl = -35; dl <= 35; dl++) {
+    const lo = Math.round(lon) + dl, v = grid[(la + 90) * 360 + ((lo % 360) + 360) % 360]; if (!v) continue;
+    const ml = Math.abs(magLat(la, lo)), w = v * v;
+    sw += w; sm += w * ml; sm2 += w * ml * ml;
+    const dkm = 111 * Math.hypot(la - lat, dl * Math.cos(lat * DEG));
+    if (dkm < 2000) near = Math.max(near, v);
+  }
+  if (!sw) return { center: 70, spread: 3, near: 0 };
+  const c = sm / sw, sd = Math.sqrt(Math.max(0, sm2 / sw - c * c));
+  return { center: c, spread: Math.max(1, Math.min(4.5, sd * 0.7)), near };
 }
 export function magLat(lat, lon) {
   const p = ecef(MAG_POLE.lat, MAG_POLE.lon, -6371 + 1), q = ecef(lat, lon, -6371 + 1);

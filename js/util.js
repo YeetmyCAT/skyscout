@@ -92,7 +92,7 @@ async function fetchT(url, opts = {}, ms = 25000) {
 // ---------- Open-Meteo free-tier budget (600 calls/min, 5000/h, 10000/day; big requests count as several) ----------
 export const RateLimit = {
   limits: [[60e3, 600], [3600e3, 5000], [864e5, 10000]],
-  load() { try { this.log = JSON.parse(localStorage.getItem('ss_om_use') || '[]'); this.until = +localStorage.getItem('ss_om_until') || 0; } catch { this.log = []; this.until = 0; } },
+  load() { try { this.log = JSON.parse(localStorage.getItem('ss_om_use') || '[]'); this.until = +localStorage.getItem('ss_om_until') || 0; this.until = Math.min(this.until, Date.now() + 3600e3); } catch { this.log = []; this.until = 0; } },
   save() { try { const t = Date.now(); this.log = this.log.filter(e => t - e[0] < 864e5); localStorage.setItem('ss_om_use', JSON.stringify(this.log)); localStorage.setItem('ss_om_until', String(this.until)); } catch { } },
   // weight of one request, as the service counts it
   weight(url) {
@@ -114,7 +114,9 @@ export const RateLimit = {
   // the service said no: block until its window resets
   blocked(reason) {
     const t = Date.now(), d = new Date(t);
-    if (/daily/i.test(reason)) this.until = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+    // The daily limit is not a midnight-UTC reset (it behaves like a rolling 24 h window), so don't promise a time:
+    // pause for an hour, then let the next forecast request check again. A refused request isn't counted.
+    if (/daily/i.test(reason)) this.until = t + 3600e3;
     else if (/hourly/i.test(reason)) this.until = Math.ceil(t / 3600e3) * 3600e3;
     else this.until = Math.ceil(t / 60e3) * 60e3 + 1000;
     this.save();

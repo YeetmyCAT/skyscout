@@ -123,6 +123,9 @@ body.menu-open .hud-read, body.menu-open #pick3d, body.menu-open .joy { display:
 body.in3d #top { display: none; }
 /* in 3D: bottom-right, under every readout, menu and popup (z-index inside the 3D view) */
 #view3d #offline { position: absolute; z-index: 2; top: auto; left: auto; right: 10px; bottom: calc(68px + var(--safe-b)); transform: none; max-width: min(54vw, 380px); font-size: 12px; padding: 6px 11px; border-radius: 12px; text-align: left; opacity: .92; }
+#offline.chip { pointer-events: auto; cursor: pointer; font-size: 12px; padding: 4px 10px; border-radius: 14px; max-width: min(80vw, 340px); opacity: .9; }
+#view3d #offline.chip { bottom: calc(64px + var(--safe-b)); right: 8px; }
+#offline.chip:not(.open) { white-space: nowrap; }
 #offline.tap { pointer-events: auto; cursor: pointer; background: #14405a; border-color: #3a9ac8; color: #d4f0ff; }
 .warnbox { background: #5a2a1499; border: 1px solid #c86a3a; color: #ffd9c2; border-radius: 10px; padding: 7px 10px; margin: 6px 0; }
 a.btn { color: var(--text); text-decoration: none; display: inline-block; }

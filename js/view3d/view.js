@@ -2,7 +2,7 @@
 import * as THREE from '../../vendor/three.module.min.js';
 import { makeSkyLUT, makeSkyBackground, makeStars, makePlanets, makeMoon, milkyWayPhoto, makeFaintStars, lpSkyTexture } from './sky.js';
 import { SkyEvents } from './skyevents.js';
-import { loadKp, kpAt, auroraParams, MAG_POLE, ecef, enuBasis, magLat, loadSatellites } from '../space.js';
+import { loadKp, kpAt, MAG_POLE, ecef, enuBasis, magLat, loadSatellites, loadOvation, synthAurora, auroraOval } from '../space.js';
 import { loadNoise, makeCloudPass, weatherTextures, R_EFF } from './clouds.js';
 import { Ground, Grass, distantLights } from './ground.js';
 import { roadMasks } from '../terrain.js';
@@ -149,7 +149,8 @@ export class Immersive {
     this.U.uENU.value.set(B.e[0], B.n[0], B.u[0], B.e[1], B.n[1], B.u[1], B.e[2], B.n[2], B.u[2]);
     this.U.uObsECEF.value.set(...o); this.U.uMagAxis.value.set(...mp).normalize();
     this.magLat = Math.abs(magLat(ctx.lat, ctx.lon));
-    loadKp().then(k => { this.kp = k; this.applyAurora(); });
+    this.auroraSrc = null; this.auroraSynth = null;
+    Promise.all([loadKp(), loadOvation()]).then(([k, ov]) => { this.kp = k; this.ovation = ov; this.applyAurora(); });
     loadSatellites().then(sv => this.events.setSatellites(sv));
     this.camera.position.set(0, this.ground.heightAt(0, 0) + this.eye, 0);
     this.lastWxKey = null;
@@ -236,13 +237,30 @@ export class Immersive {
     this.updateLabels();
   }
   // Auroral oval from the planetary Kp index at this time (observed, or NOAA's 3-day forecast).
+  // Brightness everywhere comes from a chance-of-aurora map: NOAA's live OVATION nowcast when viewing within ~2.5 h
+  // of it, otherwise a stand-in built from Kp (observed, or NOAA's 3-day forecast) and fitted to OVATION.
   applyAurora() {
-    const kp = kpAt(this.kp, this.date ? this.date.getTime() : Date.now());
+    const ms = this.date ? this.date.getTime() : Date.now();
+    const kp = kpAt(this.kp, ms) ?? 2;
     this.kpNow = kp;
-    const P = auroraParams(kp ?? 2);
-    // skip the shader work when the oval is far below this observer's horizon
-    const on = this.magLat > P.edge - 24;
-    this.U.uAurora.value.set(P.edge * DEG, P.width * DEG, on ? P.kR : 0, P.red);
+    let src = this.ovation && Math.abs(ms - this.ovation.t) < 2.5 * 3600e3 ? this.ovation : null;
+    if (!src) {
+      const key = kp.toFixed(2) + ':' + Math.round(ms / 1800e3);
+      if (!this.auroraSynth || this.auroraSynth.key !== key) { this.auroraSynth = synthAurora(kp, ms); this.auroraSynth.key = key; }
+      src = this.auroraSynth;
+    }
+    if (this.auroraSrc !== src) {
+      this.auroraSrc = src;
+      const t = this.U.uAurP.value;
+      const tex = new THREE.DataTexture(src.grid, 360, 181, THREE.RedFormat, THREE.UnsignedByteType);
+      tex.wrapS = THREE.RepeatWrapping; tex.magFilter = tex.minFilter = THREE.LinearFilter; tex.needsUpdate = true;
+      this.U.uAurP.value = tex; if (t && t.dispose) t.dispose();
+      this.auroraOval = auroraOval(src.grid, this.ctx.lat, this.ctx.lon);
+    }
+    const O = this.auroraOval;
+    // skip the shader work when nothing within ~2000 km reaches 8 %
+    this.U.uAurora.value.set(O.center * DEG, O.spread * DEG, O.near >= 8 ? 1 : 0, kp);
+    this.auroraLive = src.live;
   }
   applyTimeDependent() {
     const U = this.U, sunAlt = this.sm.sun.alt;
@@ -570,7 +588,7 @@ export class Immersive {
   updateLabels() {
     const d = [];
     for (const p of this.pl || []) if (p.alt > -1) d.push({ t: p.name, alt: p.alt + 0.8, az: p.az, cls: 'planet' });
-    if (this.kpNow != null && this.U.uAurora.value.z > 0 && this.sm.sun.alt < -10) d.push({ t: `Aurora oval (Kp ${this.kpNow.toFixed(1)})`, alt: 8, az: (this.ctx.lat >= 0 ? 0 : 180), cls: 'dome', always: false });
+    if (this.kpNow != null && this.U.uAurora.value.z > 0 && this.sm.sun.alt < -10) d.push({ t: `Aurora: up to ${this.auroraOval ? this.auroraOval.near : 0}% chance nearby (${this.auroraLive ? 'NOAA OVATION now' : `Kp ${this.kpNow.toFixed(1)}${this.date && this.date.getTime() > Date.now() + 1800e3 ? ' forecast' : ''}`})`, alt: 8, az: (this.ctx.lat >= 0 ? 0 : 180), cls: 'dome', always: false });
     if (this.sm.moon.alt > -1) d.push({ t: 'Moon', alt: this.sm.moon.alt + 1.2, az: this.sm.moon.az, cls: 'planet' });
     if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
     for (const dm of this.ctx.domes || []) d.push({ t: `${dm.name || 'Light dome'} glow`, alt: 3 + dm.strength * 4, az: dm.az, cls: 'dome', dome: true });

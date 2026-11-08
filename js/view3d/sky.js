@@ -158,13 +158,33 @@ export function lpSkyTexture(lp) {
 // Background: sky LUT + sun disc + Milky Way. Drawn first, at the far plane.
 export function makeSkyBackground(U, mwTex) {
   Object.assign(U, { uMW: { value: mwTex }, uEqToWorld: { value: new THREE.Matrix3() }, uGal: { value: new THREE.Matrix3() }, uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() }, uMWScale: { value: 1 },
-    uAurora: { value: new THREE.Vector4() }, uENU: { value: new THREE.Matrix3() }, uObsECEF: { value: new THREE.Vector3(0, 0, 6371) }, uMagAxis: { value: new THREE.Vector3(0, 0, 1) } });
+    uAurora: { value: new THREE.Vector4() }, uAurP: { value: (() => { const t = new THREE.DataTexture(new Uint8Array(4), 1, 1); t.needsUpdate = true; return t; })() }, uENU: { value: new THREE.Matrix3() }, uObsECEF: { value: new THREE.Vector3(0, 0, 6371) }, uMagAxis: { value: new THREE.Vector3(0, 0, 1) } });
   const mat = new THREE.ShaderMaterial({
     uniforms: U, depthTest: false, depthWrite: false,
     vertexShader: `out vec3 vDir; uniform mat4 uInvProjView; uniform vec3 uCamPos;
       void main(){ vec4 w = uInvProjView * vec4(position.xy, 1.0, 1.0); vDir = w.xyz/w.w - uCamPos; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform vec3 uObsECEF, uMagAxis;
+      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform sampler2D uAurP; uniform vec3 uObsECEF, uMagAxis;
+      // Distance along the ray to a surface of constant magnetic latitude phi (a cone about the dipole axis A) at
+      // auroral heights; which = 0 nearer crossing, 1 farther. -1 if none.
+      // aurora brightness (kR) where a ray meets the emitting layer, from NOAA-style chance of aurora at that spot:
+      // none below 10 %, about airglow brightness at 10 %, a little brighter at 25 %, vivid from ~75 %
+      float auroraKR(vec3 P, float kp){
+        float r = length(P), la = asin(clamp(P.z/r, -1.0, 1.0))*57.29578, lo = atan(P.y, P.x)*57.29578;
+        float p = texture(uAurP, vec2(fract((lo + 0.5)/360.0), (la + 90.5)/181.0)).r*255.0;
+        return p < 8.0 ? 0.0 : 0.25*pow(p/10.0, 1.9)*smoothstep(8.0, 10.0, p)*(1.0 + max(kp - 5.0, 0.0)*0.6);
+      }
+      float auroraSheet(vec3 O, vec3 D, vec3 A, float phi, float hemi, int which){
+        float S = sin(phi); S *= S;
+        float b = dot(O, D), c = dot(O, O), a0 = dot(O, A), a1 = dot(D, A);
+        float qa = a1*a1 - S, qb = 2.0*(a0*a1 - S*b), qc = a0*a0 - S*c;
+        float disc = qb*qb - 4.0*qa*qc; if (disc < 0.0 || abs(qa) < 1e-7) return -1.0;
+        float sq = sqrt(disc), r1 = (-qb - sq)/(2.0*qa), r2 = (-qb + sq)/(2.0*qa);
+        float t = which == 0 ? min(r1, r2) : max(r1, r2);
+        if (t <= 0.0 || (a0 + t*a1)*hemi <= 0.0) return -1.0;
+        float h = length(O + D*t) - 6371.0;
+        return (h < 85.0 || h > 420.0) ? -1.0 : t;
+      }
       void main(){
         vec3 d = normalize(vDir);
         vec3 col = skyL(d);
@@ -190,33 +210,66 @@ export function makeSkyBackground(U, mwTex) {
           vec3 T = directT(max(sh, 0.0));
           col += mw * 1.3e-3 * uMWScale * uExposure * T * smoothstep(-0.05, 0.03, sh);
         }
-        // Aurora: emission between ~100 and ~250 km where the auroral oval sits (green below, red above)
+        // Aurora: thin field-aligned sheets (curtains) folded along the auroral oval. Each view ray is intersected
+        // analytically with a few arcs (surfaces of constant magnetic latitude); emission depends on height (sharp
+        // green lower border ~100 km, red tops above 200 km, pink N2 fringe in strong storms), on rays along the arc,
+        // and on how obliquely the ray crosses the sheet. Folds drift and rays shimmer faster with higher Kp.
         if (uAurora.z > 0.0 && sh > -0.02) {
           vec3 dE = uENU * vec3(d.x, -d.z, d.y);            // world (east, up, south) -> Earth-fixed
-          float Rk = 6371.0, acc = 0.0, red = 0.0;
-          for (int k = 0; k < 5; k++) {
-            float hk = 100.0 + float(k)*35.0;
-            float b = dot(uObsECEF, dE), c = dot(uObsECEF, uObsECEF) - (Rk + hk)*(Rk + hk);
-            float tk = -b + sqrt(max(b*b - c, 0.0));
-            vec3 P = uObsECEF + dE*tk; vec3 Pn = normalize(P);
-            float ml = asin(clamp(dot(Pn, uMagAxis), -1.0, 1.0));
-            float aml = abs(ml);
-            float band = smoothstep(uAurora.x - 0.02, uAurora.x + 0.015, aml) * smoothstep(uAurora.x + uAurora.y + 0.03, uAurora.x + uAurora.y - 0.01, aml);
-            if (band <= 0.001) continue;
-            vec3 ref = normalize(cross(uMagAxis, vec3(0.0, 0.0, 1.0)) + 1e-4);
-            float mlon = atan(dot(Pn, cross(uMagAxis, ref)), dot(Pn, ref));
-            // curtains: folded arcs with fine vertical rays, drifting slowly
-            float arcs = fbm2(vec2(mlon*18.0 + uTime*0.02, aml*90.0));
-            float rays = 0.55 + 0.45*fbm2(vec2(mlon*260.0 + uTime*0.15, uTime*0.05));
-            float curtain = smoothstep(0.42, 0.7, arcs) * rays;
-            float layer = exp(-pow((hk - 115.0)/30.0, 2.0)), upper = smoothstep(150.0, 230.0, hk);
-            acc += curtain * band * layer * 0.35;
-            red += curtain * band * upper * 0.25;
+          vec3 O = uObsECEF, A = uMagAxis;
+          float hemi = dot(O, A) >= 0.0 ? 1.0 : -1.0;
+          float kp = uAurora.w, act = clamp((kp - 2.0)/5.0, 0.15, 1.4), tt = uTime;
+          vec3 refA = normalize(cross(A, vec3(0.0, 0.0, 1.0)) + 1e-4), refB = cross(A, refA);
+          float grAcc = 0.0, redAcc = 0.0, pinkAcc = 0.0;
+          for (int i = 0; i < 5; i++) {
+            float fi = float(i), lat0 = uAurora.x + (fi - 2.0)*uAurora.y;   // arcs spread across the oval
+            for (int w = 0; w < 2; w++) {                                 // near and far crossing of the sheet
+              float t = auroraSheet(O, dE, A, lat0, hemi, w);
+              if (t < 0.0) continue;
+              vec3 Pn = normalize(O + dE*t);
+              float mlon = atan(dot(Pn, refB), dot(Pn, refA));
+              // folds: large slow meanders plus small fast curls
+              float fold = 0.009*(fbm2(vec2(mlon*7.0 + fi*3.1, tt*0.004*(1.0 + 3.0*act))) - 0.5)
+                         + 0.0025*(vnoise(vec2(mlon*45.0 - tt*0.02*(1.0 + 4.0*act), fi*5.0)) - 0.5);
+              float t2 = auroraSheet(O, dE, A, lat0 + fold, hemi, w);
+              if (t2 > 0.0) { t = t2; Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA)); }
+              float h = length(O + dE*t) - 6371.0;
+              float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlon*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));   // arcs come in segments
+              float amp = (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg;
+              if (amp < 0.01) continue;
+              float kR = auroraKR(O + dE*t, kp); if (kR <= 0.0) continue;
+              // rays follow the magnetic field, so they vary only along the arc: vertical streaks that slide and flicker
+              float rx = mlon*1400.0;
+              float rays = 0.25 + 0.75*pow(vnoise(vec2(rx - tt*(0.6 + 2.5*act), fi*11.0)), 2.0) + 0.45*pow(vnoise(vec2(rx*0.23 + tt*0.25*act, fi*3.0 + 1.0)), 3.0);
+              float hb = 102.0 + 10.0*vnoise(vec2(mlon*60.0, fi*2.0 + tt*0.01));
+              float gP = smoothstep(hb - 4.0, hb + 1.0, h) * exp(-max(h - hb, 0.0)/(32.0 + 20.0*rays));
+              float rP = exp(-pow((h - 230.0)/65.0, 2.0));
+              float pP = exp(-pow((h - hb + 2.0)/4.0, 2.0));
+              vec3 nrm = normalize(A - dot(A, Pn)*Pn);                   // across the sheet
+              float geo = clamp(0.6/max(abs(dot(nrm, dE)), 0.05), 0.6, 4.0); // a thin sheet seen edge-on collects more light
+              float pulse = 1.0 + 0.35*act*sin(tt*(1.3 + fi) + mlon*30.0);
+              float I = amp*rays*geo*pulse*kR;
+              grAcc += I*gP; redAcc += I*rP; pinkAcc += I*pP;
+            }
           }
-          // a 1 kR green aurora is ~1.9e-4 cd/m^2; uAurora.z is the peak brightness in kR
-          // looking obliquely through the emitting layer collects more light (up to ~5x toward the horizon)
-          float slant = min(5.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/(6371.0 + 110.0), 2.0)), 0.2));
-          vec3 aur = (vec3(0.15, 1.0, 0.35)*acc + vec3(1.0, 0.12, 0.25)*red*(0.4 + uAurora.w)) * uAurora.z * 1.9e-4 * slant * 2.5;
+          // faint diffuse glow just equatorward of the arcs
+          {
+            float b = dot(O, dE), c = dot(O, O) - 6486.0*6486.0;
+            float tk = -b + sqrt(max(b*b - c, 0.0)); vec3 Pn = normalize(O + dE*tk);
+            float slant = min(5.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/6486.0, 2.0)), 0.2));
+            grAcc += 0.3*auroraKR(O + dE*tk, kp)*slant;
+            // storm-time red glow from ~300 km (high enough to be seen far equatorward of the green arcs)
+            if (kp > 5.0) {
+              float c3 = dot(O, O) - 6671.0*6671.0, t3 = -b + sqrt(max(b*b - c3, 0.0));
+              float slant3 = min(4.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/6671.0, 2.0)), 0.25));
+              redAcc += 0.35*auroraKR(O + dE*t3, kp)*slant3;
+            }
+          }
+          // uAurora.z: brightness in kR (a 1 kR green aurora is ~1.9e-4 cd/m^2)
+          // quiet and moderate activity: green (557.7 nm, ~100-150 km) only; red 630 nm tops (~200-300 km) and the pink
+          // N2 lower fringe (~95 km) appear only in geomagnetic storms
+          float pinkF = smoothstep(6.0, 8.0, kp), redF = smoothstep(5.0, 7.0, kp);
+          vec3 aur = (vec3(0.15, 1.0, 0.35)*grAcc + vec3(1.0, 0.12, 0.25)*redAcc*redF*1.2 + vec3(1.0, 0.25, 0.6)*pinkAcc*0.6*pinkF) * 1.9e-4;
           col += aur * directT(max(sh, 0.0)) * uExposure * smoothstep(-0.02, 0.02, sh);
         }
         gl_FragColor = vec4(min(col, vec3(3.0e4)), 1.0);
