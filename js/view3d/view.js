@@ -126,6 +126,8 @@ export class Immersive {
     this.adaptL = 1; this.skyLa = null; this.accN = 0;   // eye adaptation and cloud history start fresh at a new place
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; }
     for (const o of [this.groundObj, this.grass, this.cityLights]) if (o) { (o.group || o).removeFromParent && (o.group || o).removeFromParent(); }
+    // the grass is a mesh (not a group): remove it too, or the previous place's grass patch stays floating in the scene
+    if (this.grass && this.grass.mesh) { this.grass.mesh.removeFromParent(); this.grass.mesh.geometry.dispose(); this.grass.mesh.material.dispose(); }
     this.cityLights = null; this.roadMask = null;
     if (this.U.uLightMap) this.U.uLightMap.value = null; if (this.U.uSportsMap) this.U.uSportsMap.value = null;
     const { local, groundZ } = ctx;
