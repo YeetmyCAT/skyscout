@@ -62,7 +62,7 @@ export async function findSprites(home, opts, progress = () => { }) {
   // keep the best per site
   const seen = new Set(), best = [];
   for (const r of results) { const k = r.p.join(); if (seen.has(k)) continue; seen.add(k); best.push(r); if (best.length >= 12) break; }
-  return { best, all: results.slice(0, 2000), stormsByHour, grid: G, hours, backup: field.modelKind === 'backup', config: field.config };
+  return { best, all: results.slice(0, 2000), stormsByHour, grid: G, hours, backup: field.modelKind === 'backup', config: field.config, stormAt: field.stormAt };
 }
 function nearestCell(G, P) {
   const N = G.n, half = (N - 1) / 2, home = G.center;

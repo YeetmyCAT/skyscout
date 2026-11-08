@@ -87,7 +87,7 @@ export async function spriteStormField(home, hours, opts = {}, progress = () => 
   if (satLayer(G.center[1]) && hours.some(t => Math.abs(t - now) < SAT_WINDOW + 3600)) {
     progress('Reading the satellite image for storm complexes…');
     const ir = opts.ir || await loadIR(G.center[0], G.center[1], G.halfKm + 60).catch(() => null);
-    if (ir) sat = { obs: ir.obs / 1000, name: ir.sat.name, complexes: satComplexes(ir, G) };
+    if (ir) sat = { obs: ir.obs / 1000, name: ir.sat.name, complexes: satComplexes(ir, G), sample: ir.sample };
   }
   const N = G.n, at = (i, j) => j * N + i, stormsByHour = [], perHour = [];
   for (const t of hours) {
@@ -145,13 +145,39 @@ export async function spriteStormField(home, hours, opts = {}, progress = () => 
       kind = 'sat';
       for (const x of satCl) clusters.push(satCluster(x, G, 1));
     } else kind = 'none';
+    const sModel = s.slice();
     // the storm field used for line-of-sight blocking: model where available, satellite cold cores otherwise
     if (!wx && useSat) for (const c of clusters) for (const m of c.cells) s[m] = Math.max(s[m], 0.6);
     for (const c of clusters) c.peak = c.peak ?? 0.6;
-    stormsByHour.push({ t, s, clusters });
+    stormsByHour.push({ t, s, clusters, sModel: sModel });
     perHour.push(kind);
   }
-  return { stormsByHour, grid: G, wx, config: describe(perHour, modelKind, sat, hours), modelKind, sat: sat && { obs: sat.obs, name: sat.name } };
+  // How stormy it is at one place and time from the same storm data as the sprites, so the weather where you stand
+  // agrees with the storms seen from far away wherever the satellite observes them. strength 0..1, thunder true/false.
+  const stormAt = (la, lo, t) => {
+    let hb = 0; for (let k = 0; k < hours.length; k++) if (Math.abs(hours[k] - t) < Math.abs(hours[hb] - t)) hb = k;
+    if (!hours.length || Math.abs(hours[hb] - t) > 5400) return { strength: 0, thunder: false };
+    const kind = perHour[hb], H = stormsByHour[hb];
+    const k = nearestIdx(G, la, lo), m = k >= 0 && H.sModel ? H.sModel[k] : 0;
+    const model = m >= 0.22 ? m : 0;
+    let satS = 0, satT = NaN;
+    if (kind.includes('sat') && sat && sat.sample) {
+      // coldest top within ~20 km: under an anvil it rains; very cold (deep) tops mean heavy convective rain and lightning
+      const d = 0.18, cs = Math.cos(la * Math.PI / 180);
+      for (const [a, b] of [[0, 0], [d, 0], [-d, 0], [0, d / cs], [0, -d / cs]]) { const T = sat.sample(la + a, lo + b); if (isFinite(T)) satT = isFinite(satT) ? Math.min(satT, T) : T; }
+      if (satT <= -50) satS = clamp((-satT - 50) / 18, 0, 1);
+    }
+    const seen = isFinite(satT) && satT <= -45;     // the satellite sees cold, high cloud here
+    // Accuracy first: the satellite is an observation, so where it applies its storm overrides a dry point forecast
+    // (the forecast storm field adds only where the satellite confirms cold cloud). In forecast-only hours the
+    // 7-model forecast at the exact spot is the better local estimate than a 120 km storm-grid cell, so no override.
+    let strength;
+    if (kind === 'primary+sat') strength = Math.max(satS, seen ? model * 0.6 : 0);
+    else if (kind === 'backup+sat' || kind === 'sat') strength = satS;
+    else strength = 0;
+    return { strength, thunder: strength >= 0.45 || satT <= -58, kind, satT };
+  };
+  return { stormsByHour, grid: G, wx, config: describe(perHour, modelKind, sat, hours), modelKind, sat: sat && { obs: sat.obs, name: sat.name }, stormAt };
 }
 
 function satCluster(x, G, w) {

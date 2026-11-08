@@ -713,7 +713,7 @@ async function runSprites() {
 }
 function openSpriteSpot(r, name) {
   setTime(new Date(r.t * 1000));
-  open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config } });
+  open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config, stormAt: S.spriteRes.stormAt } });
 }
 // Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
 function checkSpritePrompt() {

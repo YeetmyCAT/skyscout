@@ -205,7 +205,7 @@ export class Immersive {
     this.structures.dispose(); this.structures = null; if (this.U.uLightMap) this.U.uLightMap.value = null; if (this.U.uSportsMap) this.U.uSportsMap.value = null;
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; if (this.grass) { this.grass.exclude = null; this.grass.center = null; } }
   }
-  setFarStorms(list) { this.farAuto = null; this.farStorms.setForecast(null); this.farStorms.set(list || []); }
+  setFarStorms(list) { this.stormField = null; this.farAuto = null; this.farStorms.setForecast(null); this.farStorms.set(list || []); }
   // storms found on the satellite image when the view opened: shown while the time is within 3 h of the image
   setFarAuto(a) { this.farAuto = a; this.farStormsSet = false; this.farStorms.setForecast(null); if (a) this.applyFarAuto(); else this.farStorms.set([]); }
   applyFarAuto() {
@@ -213,7 +213,7 @@ export class Immersive {
     const ok = Math.abs(this.unix * 1000 - this.farAuto.obs) < 3 * 3600e3;
     if (ok !== this.farAutoShown || !this.farStormsSet) { this.farStorms.set(ok ? this.farAuto.list : []); this.farAutoShown = ok; this.farStormsSet = true; }
   }
-  setStormForecast(data) { this.farAuto = null; this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); this.updateLabels(); }
+  setStormForecast(data) { this.farAuto = null; this.stormField = data && data.stormAt ? data : null; this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); if (this.stormField) { this.lastWxKey = null; this.applyWeather(true); } this.updateLabels(); }
 
   // ---------- time ----------
   setTime(date, force) {
@@ -293,6 +293,16 @@ export class Immersive {
     const ctx = this.ctx, U = this.U, t = this.unix, gz = ctx.groundZ;
     const pt = ctx.point;
     const L = cloudLayers(pt, t, gz);
+    // the same storm data as the distant storms and sprites: if it puts a storm complex overhead, this spot is
+    // under it (overcast, raining, thundering) even when the averaged point forecast is dry
+    const st = this.stormField && this.stormField.stormAt ? this.stormField.stormAt(ctx.lat, ctx.lon, t) : null;
+    this.localStorm = st && st.strength > 0.2 ? st : null;
+    if (this.localStorm) {
+      const k = this.localStorm.strength;
+      L.storm = Math.max(L.storm, k);
+      L.low.cover = Math.max(L.low.cover, 0.55 + 0.4 * k); L.mid.cover = Math.max(L.mid.cover, 0.85); L.high.cover = Math.max(L.high.cover, 0.9);
+      L.precip = Math.max(L.precip, 1 + 14 * Math.pow(k, 1.5));
+    }
     this.layers = L;
     U.uOvercast.value = clamp(Math.max(L.low.cover, L.mid.cover * 0.85, L.storm) * 1.15 - 0.15, 0, 1);
     const rel = z => Math.max(0, z - gz);
@@ -306,6 +316,11 @@ export class Immersive {
     const ha = (L.windHigh.dir + 180) * DEG; U.uCirrusDir.value.set(Math.sin(ha), -Math.cos(ha)).normalize();
     // precipitation and visibility
     const ps = precipState(pt, t); this.precipNow = ps;
+    if (this.localStorm) {
+      const k = this.localStorm.strength, rate = 1 + 14 * Math.pow(k, 1.5);   // anvil rain ~1-4 mm/h, convective cores 10-15
+      if (ps.type === 'none' || ps.rate < rate) { ps.type = (ps.T ?? 10) < 0.5 ? 'snow' : 'rain'; ps.rate = Math.max(ps.rate, rate); }
+      if (this.localStorm.thunder) ps.thunder = 1;
+    }
     const lw = wv(L.windLow, 1);
     this.precip.set(ps.type, ps.rate, [lw.x * 0.3, lw.y * 0.3]);
     U.uPrecipSnow.value = ps.type === 'snow' ? 1 : 0;
@@ -332,7 +347,7 @@ export class Immersive {
     if (force || key !== this.lastWxKey) { this.lastWxKey = key; this.buildCloudTextures(t); }
     // lightning
     const cells = this.stormCells || [];
-    const rate = cells.reduce((s, c) => s + c.strength, 0) * 4 + (ps.thunder ? 4 : 0);
+    const rate = Math.min(90, cells.reduce((s, c) => s + c.strength, 0) * 4 + (ps.thunder ? 4 : 0));   // flashes per minute (a big complex fills the domain with cells)
     if (ps.thunder && !cells.length) cells.push({ x: 4000, z: -3000, strength: 1, base: U.uLowBase.value });
     this.lightning.setStorms(cells, rate);
   }
@@ -351,13 +366,26 @@ export class Immersive {
       return { low: g('cloud_cover_low') / 100, mid: g('cloud_cover_mid') / 100, high: g('cloud_cover_high') / 100, cu: clamp(0.25 + conv - (g('cloud_cover_low') > 85 ? 0.35 : 0), 0, 1), storm, precip: clamp(pr / 4, 0, 1), lcl: clamp(125 * (T - Td), 100, 3000) };
     }) : null;
     const n = grid ? grid.n : 0;
-    const gridAt = (x, z) => {
+    // shared storm data on a 15 km lattice over the cloud domain
+    const SF = this.stormField && this.stormField.stormAt ? this.stormField : null, fsN = 17, fs = new Float32Array(fsN * fsN);
+    if (SF) for (let j = 0; j < fsN; j++) for (let i = 0; i < fsN; i++) {
+      const x = (i / (fsN - 1) * 2 - 1) * half, z = (j / (fsN - 1) * 2 - 1) * half, [la, lo] = ctx.local.toLL(x, -z);
+      fs[j * fsN + i] = SF.stormAt(la, lo, t).strength;
+    }
+    const fsAt = (x, z) => { if (!SF) return 0; const fx = clamp((x / half + 1) / 2 * (fsN - 1), 0, fsN - 1.001), fz = clamp((z / half + 1) / 2 * (fsN - 1), 0, fsN - 1.001), i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
+      return (fs[j * fsN + i] * (1 - u) + fs[j * fsN + i + 1] * u) * (1 - v) + (fs[(j + 1) * fsN + i] * (1 - u) + fs[(j + 1) * fsN + i + 1] * u) * v; };
+    const gridAt0 = (x, z) => {
       if (!per) return { low: L.low.cover, mid: L.mid.cover, high: L.high.cover, cu: L.low.cumuliform, storm: L.storm, precip: clamp(L.precip / 4, 0, 1) };
       const fx = clamp((x / grid.half + 1) / 2 * (n - 1), 0, n - 1.001), fy = clamp((-z / grid.half + 1) / 2 * (n - 1), 0, n - 1.001);
       const i = Math.floor(fx), j = Math.floor(fy), u = fx - i, v = fy - j;
       const P = (a, b) => per[b * n + a] || per[Math.floor(n * n / 2)];
       const a = P(i, j), b = P(i + 1, j), c = P(i, j + 1), d = P(i + 1, j + 1);
       const o = {}; for (const k of ['low', 'mid', 'high', 'cu', 'storm', 'precip']) o[k] = (a[k] * (1 - u) + b[k] * u) * (1 - v) + (c[k] * (1 - u) + d[k] * u) * v;
+      return o;
+    };
+    const gridAt = (x, z) => {
+      const o = gridAt0(x, z), f = fsAt(x, z);
+      if (f > 0.2) { o.storm = Math.max(o.storm, f); o.precip = Math.max(o.precip, Math.min(1, 0.3 + 0.7 * f)); o.low = Math.max(o.low, 0.5 + 0.4 * f); o.mid = Math.max(o.mid, 0.8); o.high = Math.max(o.high, 0.9); }
       return o;
     };
     const sat = ctx.sat, sn = sat ? sat.grid.n : 0;
