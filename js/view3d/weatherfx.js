@@ -279,10 +279,10 @@ export class FarStorms {
     for (const [k, c] of a.clusters.entries()) {
       let best = -1, bd = 250;
       b.clusters.forEach((d, j) => { const x = dist(c, d); if (x < bd && !used.has(j)) { bd = x; best = j; } });
-      if (best >= 0) { used.add(best); const d = b.clusters[best]; out.push({ id: `${i}:${k}`, la: c.la + (d.la - c.la) * f, lo: c.lo + (d.lo - c.lo) * f, area: c.area + (d.area - c.area) * f, peak: c.peak + (d.peak - c.peak) * f, topKm: c.topKm + (d.topKm - c.topKm) * f }); }
-      else out.push({ id: `${i}:${k}`, ...c, peak: c.peak * (1 - f) });           // dying
+      if (best >= 0) { used.add(best); const d = b.clusters[best]; out.push({ id: `${i}:${k}`, la: c.la + (d.la - c.la) * f, lo: c.lo + (d.lo - c.lo) * f, area: c.area + (d.area - c.area) * f, peak: c.peak + (d.peak - c.peak) * f, topKm: c.topKm + (d.topKm - c.topKm) * f, spriteRate: (c.spriteRate ?? 0) + ((d.spriteRate ?? 0) - (c.spriteRate ?? 0)) * f }); }
+      else out.push({ id: `${i}:${k}`, ...c, peak: c.peak * (1 - f), spriteRate: (c.spriteRate ?? 0) * (1 - f) });           // dying
     }
-    b.clusters.forEach((d, j) => { if (!used.has(j)) out.push({ id: `n${i}:${j}`, ...d, peak: d.peak * f }); });   // forming
+    b.clusters.forEach((d, j) => { if (!used.has(j)) out.push({ id: `n${i}:${j}`, ...d, peak: d.peak * f, spriteRate: (d.spriteRate ?? 0) * f }); });   // forming
     const list = [];
     for (const c of out) {
       const dKm = haversine(F.lat, F.lon, c.la, c.lo) / 1000;
@@ -291,7 +291,7 @@ export class FarStorms {
       if (edge < 80 || edge > 650 || c.peak < 0.08) continue;
       const az = bearing(F.lat, F.lon, c.la, c.lo);
       const drop = curveDrop(edge * 1000) / 1000;
-      list.push({ id: c.id, az, distKm: edge, topKm: c.topKm, strength: c.peak, widthKm: Math.min(400, Math.sqrt(c.area) * 1.1), area: c.area, spriteAlt: Math.atan((75 - drop) / edge) * 180 / Math.PI });
+      list.push({ id: c.id, az, distKm: edge, topKm: c.topKm, strength: c.peak, spriteRate: c.spriteRate ?? 0, widthKm: Math.min(400, Math.sqrt(c.area) * 1.1), area: c.area, spriteAlt: Math.atan((75 - drop) / edge) * 180 / Math.PI });
     }
     this.set(list);
   }
@@ -321,10 +321,10 @@ export class FarStorms {
       s.mesh.material.uniforms.uI.value = f * s.strength;
       // sprites: whenever a strong storm is in view on a dark night (local clouds still hide them). Large systems
       // produce one every few seconds to a minute; the sprite mode shows them a little more often than real.
-      if (night && s.strength > 0.15) {
+      if (night && (s.spriteRate ?? 0) > 0.15) {
         if (!s.nextSprite) s.nextSprite = now + 1 + Math.random() * 3;
         if (now > s.nextSprite) {
-          const rate = (spriteMode ? 0.15 : 0.05) * s.strength * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
+          const rate = (spriteMode ? 0.15 : 0.05) * s.spriteRate * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
           s.nextSprite = now + (-Math.log(Math.random())) / rate;
           s.flashT = now; s.flashI = 1.6;                      // the parent +CG stroke lights the cloud
           this.spawnSprite(s, now);

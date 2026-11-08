@@ -1,7 +1,8 @@
 // SkyScout: app controller — location, time, panels, map overlays, 3D view, scouting, sprites, offline.
 import { $, el, clamp, makeLocal, Net, fmtAgo, cachedJSON, haversine, bearing, destination, DEG, idbPrune, RateLimit } from './util.js';
 import { POINT_WEIGHT, pointForecast, gridForecast, airQuality, val, cloudLayers, cloudTypeNames, fogRisk, precipState, MODEL_NAMES, WMO, profile, GRID_MODELS } from './weather.js';
-import { loadIR, analyseIR, satLayer, stormsFromIR } from './satellite.js';
+import { loadIR, analyseIR, satLayer } from './satellite.js';
+import { spriteStormField } from './spritestorms.js';
 import { atlasRatio, ratioToSqm } from './atlas.js';
 import { calibrateToAtlas, loadLights, skyBrightness, domeNames, bortle, BORTLE_TXT, nelm, lum2mag, NAT_SKY, loadRegionalLights, quickLP, QUICK } from './lightpol.js';
 import { nightInfo, sunMoon, phaseName } from './astro.js';
@@ -488,12 +489,12 @@ async function open3D(site) {
         sat = { obs: ir.obs, half, grid: analyseIR(ir, local, half, 96, profile(point, now), val(point, 'temperature_2m', now) ?? 10, point.elevation), name: ir.sat.name };
       }
     }
-    // distant thunderstorm complexes on the same satellite image (no forecast quota): horizon storms, flicker, sprites
-    let farAuto = null;
-    if (!(site && (site.spriteData || site.farStorms)) && Math.abs(S.time - Date.now()) < 7 * 3600e3 && satLayer(lon)) {
-      prog('Looking for distant thunderstorms on the satellite image…');
-      const irFar = await loadIR(lat, lon, 700).catch(() => null);
-      if (irFar) farAuto = { obs: irFar.obs, list: stormsFromIR(irFar, local, 700) };
+    // distant storm complexes and which can make sprites: the same method as the Sprite finder, using forecast data
+    // already saved (no quota) plus the satellite image near the present
+    let stormField = null;
+    if (!(site && (site.spriteData || site.farStorms))) {
+      const t0 = Math.floor(S.time.getTime() / 3600e3) * 3600 - 12 * 3600, hrs = []; for (let k = 0; k <= 48; k++) hrs.push(t0 + k * 3600);
+      stormField = await spriteStormField([lat, lon], hrs, { models: 'cache' }, prog).catch(() => null);
     }
     if (lights && !lp) {
       prog('Modelling light pollution across the whole sky…');
@@ -506,9 +507,10 @@ async function open3D(site) {
     const ctx = { lat, lon, name: site ? site.name : S.sel.name, time: S.time, local, groundZ: point.elevation, point, utcOffset: point.utcOffset, aq, lights, lp, domes,
       grid: series ? { series, n, half } : null, sat, sprites: site && site.sprites ? site.sprites : [] };
     await S.view.open(ctx, prog);
-    if (site && site.spriteData) { S.view.setStormForecast(site.spriteData); S.view.U.uSpriteMode.value = 1; $('#spriteSim').classList.add('on'); S.spriteView = { t0: S.time.getTime() / 1000 }; }
+    if (site && site.spriteData) { S.view.setStormForecast(site.spriteData); S.view.spriteConfig = site.spriteData.config || null; S.view.U.uSpriteMode.value = 1; $('#spriteSim').classList.add('on'); S.spriteView = { t0: S.time.getTime() / 1000 }; }
     else if (site && site.farStorms) { S.view.setFarStorms(site.farStorms); S.spriteView = null; }
-    else { S.view.setFarAuto(farAuto); S.spriteView = null; }
+    else if (stormField) { S.view.setStormForecast(stormField); S.view.spriteConfig = stormField.config; S.spriteView = null; }
+    else { S.view.setFarStorms([]); S.view.spriteConfig = null; S.spriteView = null; }
     $('#spritePrompt') && $('#spritePrompt').classList.add('hidden');
     if (site && site.lookAz != null) { S.view.yaw = site.lookAz; S.view.pitch = site.lookAlt || 10; }
     S.view.urban = lights ? urbanLookup(lights) : null;
@@ -534,6 +536,8 @@ function hudRead(force) {
   $('#read3d').innerHTML = `Looking ${dirName(v.yaw)} ${Math.round(v.yaw)}° · alt ${v.pitch.toFixed(0)}° · FOV ${v.fov.toFixed(0)}°<br>
     Sun ${sm.sun.alt.toFixed(1)}° · Moon ${sm.moon.alt.toFixed(0)}° (${(sm.moonFrac * 100).toFixed(0)}%)${sqm ? ` · zenith ${sqm.toFixed(2)} mag/″² (Bortle ${bortle(sqm)})` : ''}<br>
     ${types}${v.snowDepth > 0.005 ? ` · snow on ground ${U.cm(v.snowDepth * 100)}` : ''}${v.precipNow && v.precipNow.type !== 'none' ? ` · ${v.precipNow.type} ${v.precipNow.rate.toFixed(1)} mm/h` : ''}${v.ctx.sat ? ` · satellite ${v.ctx.sat.name} ${new Date(v.ctx.sat.obs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}`;
+  // which data the sprite storms come from (same method as the Sprite finder)
+  if (v.spriteConfig && v.sm.sun.alt < -6) $('#read3d').insertAdjacentHTML('beforeend', `<br><span style="opacity:.7">Sprite storms: ${v.spriteConfig.at ? v.spriteConfig.at(v.unix) : v.spriteConfig.short}</span>`);
 }
 function showPick(p) {
   const box = $('#pick3d');
@@ -573,6 +577,7 @@ function setup3DMenu() {
 }
 async function loadStructuresNow() {
   const v = S.view; if (!v || !v.ctx) return;
+  const ctx0 = v.ctx;   // if the view moves to another place before this finishes, the result is thrown away
   const st = $('#structStatus'), btn = $('#loadStruct'); btn.disabled = true;
   const detail = +$('#structDetail').value;
   st.textContent = 'Downloading OpenStreetMap buildings, trees, lamps, power lines…';
@@ -585,6 +590,7 @@ async function loadStructuresNow() {
     await new Promise(r => setTimeout(r, 30));
     const lat = v.ctx.lat, al = Math.abs(lat), coniferShare = al > 58 ? 0.92 : al > 50 ? 0.6 : al > 42 ? 0.35 : al < 23 ? 0 : 0.2;
     const urban = v.urban ? ((x, z) => { const [la, lo] = v.ctx.local.toLL(x, -z); return v.urban(la, lo); }) : (() => 0);
+    if (v.ctx !== ctx0) { btn.disabled = false; return; }
     const stats = v.setStructures(osm, { detail, canopyTrees: canopy, imageryTrees: $('#estTrees').checked, estimateLamps: $('#estLamps').checked, urbanAt: urban, coniferShare });
     st.textContent = `Loaded ${stats.buildings} buildings${stats.extraBuildings ? ` (${stats.extraBuildings} footprints from Microsoft/Google/other maps via Overture)` : ''}${stats.addrHouses ? ` (${stats.addrHouses} generic houses at addresses with no footprint)` : ''}, ${stats.trees} trees${canopy ? ` (incl. crowns seen in aerial photos)` : ''}, ${stats.lamps} lights${v.structures.powerStats ? `, ${v.structures.powerStats.towers + v.structures.powerStats.poles} power structures` : ''}${v.structures.sportsCount ? `, ${v.structures.sportsCount} floodlit sports fields (on until 10:30 pm)` : ''}${stats.farms ? `. Fields: ${stats.farms}` : ''} (${stats.ms} ms).${osm.stale ? ' (saved copy)' : ''}${osm.fallback ? ' OpenStreetMap servers were busy, so this scene uses Overture Maps data (no lamps or tree points).' : ''}`;
   } catch (e) { st.textContent = 'Could not load map data: ' + e.message; }
@@ -707,7 +713,7 @@ async function runSprites() {
 }
 function openSpriteSpot(r, name) {
   setTime(new Date(r.t * 1000));
-  open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour } });
+  open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config } });
 }
 // Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
 function checkSpritePrompt() {
@@ -730,9 +736,9 @@ function checkSpritePrompt() {
 function listSprites(res, night) {
   const box = $('#spList'); map.storms.clearLayers(); map.results.clearLayers();
   const z = tz();
-  const nStorms = res.stormsByHour.reduce((s, h) => s + h.clusters.length, 0);
+  const nStorms = res.stormsByHour.reduce((s, h) => s + h.clusters.filter(c => c.spriteRate > 0).length, 0);   // sprite-capable complexes only
   $('#spProg').textContent = res.best.length ? `Found ${res.best.length} viewing spots.` : nStorms ? 'Storms are forecast, but none are well placed with clear sky toward them tonight.' : 'No sprite-capable thunderstorm systems are forecast within range for this night.';
-  if (res.backup) $('#spProg').textContent += ' (Lower-quality backup forecast: the free 7-model service is at its limit, so storms are found only from forecast thunder, without instability data.)'
+  if (res.config) $('#spProg').textContent += ` Storm data: ${res.config.label}.`;
   box.innerHTML = '';
   // storm cells at the best hour
   const bestT = res.best[0] ? res.best[0].t : (res.stormsByHour.find(h => h.clusters.length) || {}).t;

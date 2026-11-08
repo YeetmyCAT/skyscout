@@ -36,11 +36,34 @@ export async function waterMaskCanvas(local, halfSize, z, px = 1024) {
   if (!c) return null;
   const g = c.getContext('2d', { willReadFrequently: true }), d = g.getImageData(0, 0, px, px), a = d.data;
   // the canvas starts filled with an earthy colour, so untiled areas read as land
-  for (let i = 0; i < a.length; i += 4) { const w = isWaterPixel(a[i], a[i + 1], a[i + 2]) ? 255 : 0; a[i] = a[i + 1] = a[i + 2] = w; a[i + 3] = 255; }
+  const m = new Uint8Array(px * px);
+  for (let i = 0; i < m.length; i++) m[i] = isWaterPixel(a[i * 4], a[i * 4 + 1], a[i * 4 + 2]) ? 1 : 0;
+  // the basemap prints water-body names (e.g. "Suez Canal") on the water: close those thin letter strokes
+  // (grow water by 3 px, then shrink it back), which leaves real shorelines where they were
+  const close = closeMask(m, px, 3);
+  for (let i = 0; i < m.length; i++) { const w = close[i] ? 255 : 0; a[i * 4] = a[i * 4 + 1] = a[i * 4 + 2] = w; a[i * 4 + 3] = 255; }
   g.putImageData(d, 0, 0);
   return c;
 }
-export const IMAGERY = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+// blankTile=false: a missing tile is a 404 instead of a 'Map data not yet available' picture (open ocean at high zoom)
+// morphological closing of a 0/1 mask with a square of radius r (separable max, then min)
+function closeMask(m, n, r) {
+  const pass = (src, horiz, fn) => {
+    const out = new Uint8Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      let v = fn === 'max' ? 0 : 1;
+      for (let k = -r; k <= r; k++) {
+        const xx = horiz ? Math.min(n - 1, Math.max(0, x + k)) : x, yy = horiz ? y : Math.min(n - 1, Math.max(0, y + k));
+        const s = src[yy * n + xx];
+        if (fn === 'max') { if (s) { v = 1; break; } } else if (!s) { v = 0; break; }
+      }
+      out[y * n + x] = v;
+    }
+    return out;
+  };
+  return pass(pass(pass(pass(m, true, 'max'), false, 'max'), true, 'min'), false, 'min');
+}
+export const IMAGERY = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}?blankTile=false`;
 
 // Height sampler over tiles at zoom z covering a lat/lon box. Bilinear, metres.
 export async function heightField(lat, lon, radiusM, z) {
@@ -76,7 +99,16 @@ export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGE
   const y0 = Math.floor(lat2y(latN, z)), y1 = Math.floor(lat2y(latS, z));
   if ((x1 - x0 + 1) * (y1 - y0 + 1) > maxTiles) return null;
   const list = []; for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) list.push({ x, y });
-  const imgs = await pool(list, 6, async t => { const b = await cachedBlob(urlFn(z, t.x, t.y), 120 * 864e5); return b ? { ...t, bmp: await createImageBitmap(b).catch(() => null) } : null; });
+  const imgs = await pool(list, 6, async t => {
+    const b = await cachedBlob(urlFn(z, t.x, t.y), 120 * 864e5);
+    if (b) return { ...t, bmp: await createImageBitmap(b).catch(() => null) };
+    // aerial imagery has gaps at high zoom (open ocean): use the nearest coarser tile, cropped to this tile's area
+    if (urlFn === IMAGERY) for (let k = 1; k <= 5; k++) {
+      const f = 2 ** k, px0 = Math.floor(t.x / f), py0 = Math.floor(t.y / f), pb = await cachedBlob(urlFn(z - k, px0, py0), 120 * 864e5);
+      if (pb) { const bmp = await createImageBitmap(pb).catch(() => null); if (bmp) return { ...t, bmp, crop: [(t.x - px0 * f) * bmp.width / f, (t.y - py0 * f) * bmp.height / f, bmp.width / f, bmp.height / f] }; }
+    }
+    return null;
+  });
   const cv = document.createElement('canvas'); cv.width = cv.height = px;
   const g = cv.getContext('2d'); g.fillStyle = '#4a5a3a'; g.fillRect(0, 0, px, px);
   // Map each tile's mercator box into local metres (small-area approximation is fine here).
@@ -85,7 +117,8 @@ export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGE
     if (!t || !t.bmp) continue; n++;
     const [ax, ay] = local.toXY(y2lat(t.y, z), x2lon(t.x, z)), [bx, by] = local.toXY(y2lat(t.y + 1, z), x2lon(t.x + 1, z));
     const sx = v => (v + halfSize) / (2 * halfSize) * px, sy = v => (halfSize - v) / (2 * halfSize) * px;
-    g.drawImage(t.bmp, sx(ax), sy(ay), sx(bx) - sx(ax), sy(by) - sy(ay));
+    if (t.crop) g.drawImage(t.bmp, ...t.crop, sx(ax), sy(ay), sx(bx) - sx(ax), sy(by) - sy(ay));
+    else g.drawImage(t.bmp, sx(ax), sy(ay), sx(bx) - sx(ax), sy(by) - sy(ay));
   }
   return n ? cv : null;
 }

@@ -85,6 +85,13 @@ export async function gridForecast(points, tag, opts = {}) {
     const lat = P.map(p => r4(p[0])).join(','), lon = P.map(p => r4(p[1])).join(',');
     const url = `${API}?latitude=${lat}&longitude=${lon}&hourly=${vars.join(',')}&models=${models.join(',')}&forecast_days=4&past_days=1&timezone=GMT&timeformat=unixtime`;
     let res = null;
+    if (opts.cacheOnly) {   // only what is already saved (no network, no quota); missing chunks stay empty
+      try { res = await cachedJSON(`grid:${tag}:${i}`, url, 50 * 60e3, { cacheOnly: true }); } catch { }
+      if (!res) { for (let k = 0; k < P.length; k++) out.push(null); continue; }
+      const arr = Array.isArray(res.data) ? res.data : [res.data];
+      for (const j of arr) { const p = parse(j, vars, models); p.fetched = res.t; p.stale = res.stale; out.push(p); }
+      continue;
+    }
     try { res = await cachedJSON(`grid:${tag}:${i}`, url, 50 * 60e3, { timeout: 60000 }); }
     catch (e) { if (!e.rateLimited) throw e; }
     if (!res || (res.stale && RateLimit.waitMs() > 0 && Date.now() - res.t > SAVED_OK)) {

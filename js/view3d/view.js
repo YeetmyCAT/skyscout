@@ -123,6 +123,7 @@ export class Immersive {
     // forget everything from the previous place: buildings, their light glare and traffic (kept in the foreground
     // pass), farms, ground light pools, far city lights
     this.clearStructures();
+    this.adaptL = 1; this.skyLa = null; this.accN = 0;   // eye adaptation and cloud history start fresh at a new place
     if (this.farms) { this.farms.group.removeFromParent(); this.farms = null; }
     for (const o of [this.groundObj, this.grass, this.cityLights]) if (o) { (o.group || o).removeFromParent && (o.group || o).removeFromParent(); }
     this.cityLights = null; this.roadMask = null;
@@ -509,6 +510,7 @@ export class Immersive {
       if (this.skyLa) { const cover = this.layers ? clamp(Math.max(this.layers.low.cover, this.layers.mid.cover * 0.8, this.layers.storm), 0, 1) : 0; La = lerp(La, this.skyLa * (1 - 0.8 * cover), smooth(-8, -2, this.sm.sun.alt)); }
     }
     this.adaptL = Math.exp(lerp(Math.log(this.adaptL), Math.log(La), 1 - Math.exp(-dt * 3)));
+    if (!isFinite(this.adaptL) || this.adaptL <= 0) this.adaptL = isFinite(La) && La > 0 ? La : 1;   // never let a bad value stick
     const night = this.sm.sun.alt < -4;
     let E = 0.0922 / Math.pow(this.adaptL, 0.72) * Math.pow(2, this.ev);
     E *= lerp(1, 0.4, smooth(0, -3.3, Math.log10(this.adaptL)));   // night scenes read darker to the eye
