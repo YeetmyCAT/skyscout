@@ -79,7 +79,7 @@ function updateOffline() {
   let txt = '';
   if (!Net.online) txt = `You're offline — showing the last data saved ${Net.lastOnline ? fmtAgo(Net.lastOnline) : ''}`;
   else if (w > 0) {
-    const head = `Free 7-model weather limit reached · trying again in ${fmtWait(w)}`;
+    const head = `Free 7-model weather limit reached${RateLimit.shared ? ' (probably by another device on the same internet connection)' : ''} · trying again in ${fmtWait(w)}`;
     if (P && P.backup) txt = `${head} — using the lower-quality backup forecast (${P.models.map(m => m === 'nws' ? 'US NWS' : 'MET Norway').join(' + ')})`;
     else if (P && P.stale) txt = `${head} — showing the forecast saved ${fmtAgo(P.fetched)}`;
     else if (P) txt = `${head} — this forecast was saved ${fmtAgo(P.fetched)}`;
@@ -174,7 +174,7 @@ async function selectLocation(lat, lon, name, restoring) {
   if (!restoring && innerWidth <= 820) $('#panel').classList.remove('min');
   const box = $('#tab-cond');
   box.innerHTML = `<div class="place">${S.sel.name}</div><div class="sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</div>
-    <button class="btn primary big" id="fetchBtn">Fetch forecast</button><div class="small muted" id="fetchNote"></div>`;
+    <button class="btn primary big" id="fetchBtn">Fetch forecast</button><div class="small muted" id="fetchCost"></div><div class="small muted" id="fetchNote"></div>`;
   document.querySelector('.tabs button[data-tab=cond]').click();
   $('#fetchBtn').onclick = () => fetchForecast(tok);
   updateFetchButton();
@@ -198,6 +198,7 @@ function updateFetchButton() {
     } else {
       const left = Math.floor(RateLimit.remaining() / POINT_WEIGHT);
       b.disabled = false; b.textContent = `Fetch forecast · about ${left} left before the free limit`;
+      const c = $('#fetchCost'); if (c) c.textContent = 'Counted on this device. Opening the 3D view uses about 8 of these and a Best spots search about 8–10.';
     }
   };
   tick(); fetchTimer = setInterval(tick, 1000);

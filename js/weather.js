@@ -50,7 +50,7 @@ function worstCode(col) {
   return sorted[sorted.length - 1];
 }
 
-export const POINT_WEIGHT = POINT_MODELS.length * Math.ceil(([...SURF, ...PL].length) / 10) + 1;
+export const POINT_WEIGHT = POINT_MODELS.length * ([...SURF, ...PL].length) / 10 + 1;   // forecast + air quality, Open-Meteo's weighting
 // A saved 7-model forecast younger than this beats the lower-quality backup.
 const SAVED_OK = 3 * 3600e3;
 export async function pointForecast(lat, lon, opts = {}) {

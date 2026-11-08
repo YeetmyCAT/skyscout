@@ -91,7 +91,7 @@ export async function imageryCanvas(local, halfSize, z, px = 2048, urlFn = IMAGE
 }
 
 // Open water at points, from the Esri dark-gray basemap (water is one flat dark colour).
-export async function waterMany(points, z = 14) {
+export async function waterMany(points, z = 14, frac = 0.5) {
   const out = [];
   for (const [la, lo] of points) {
     const fx = lon2x(lo, z), fy = lat2y(la, z), tx = Math.floor(fx), ty = Math.floor(fy);
@@ -103,7 +103,7 @@ export async function waterMany(points, z = 14) {
       const x = Math.max(0, Math.min(px.w - 1, cx + dx)), y = Math.max(0, Math.min(px.h - 1, cy + dy)), k = (y * px.w + x) * 4;
       if (isWaterPixel(px.data[k], px.data[k + 1], px.data[k + 2])) wet++; n++;
     }
-    out.push(wet / n > 0.5);
+    out.push(wet / n > frac);
   }
   return out;
 }

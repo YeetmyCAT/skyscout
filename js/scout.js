@@ -105,11 +105,13 @@ export async function scout(home, opts, progress = () => { }) {
     r.driveTraffic = r.drive * (1 + (cong - 1) * urbanHome * Math.min(1, 25000 / Math.max(5000, r.roadDist || 1))) * r.roadK;
     return r;
   }).filter(Boolean);
-  // Walk-in spots: drop any that sit on open water (aerial photo colour)
-  if (opts.allowOffRoad) {
-    progress('Checking walk-in spots for water…');
-    const wet = await waterMany(all.filter(r => r.walk > 60).map(r => r.p));
-    let k = 0; all = all.filter(r => !(r.walk > 60 && wet[k++]));
+  // No spot may be on water of any kind (lakes, ponds, rivers, the sea), whatever the access mode and whether or not
+  // routing moved it onto a road: test every site and its parking point on the map's water layer.
+  progress('Checking every spot for water…');
+  {
+    const pts = []; for (const r of all) { pts.push(r.p); pts.push(r.parkAt || r.p); }
+    const wet = await waterMany(pts, 14, 0.25);
+    all = all.filter((r, i) => !wet[2 * i] && !wet[2 * i + 1]);
   }
   // Darkness at the snapped spot from the light pollution atlas (VIIRS); horizon glow from the regional model.
   progress('Reading the light pollution atlas…');

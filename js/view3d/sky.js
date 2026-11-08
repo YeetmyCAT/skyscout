@@ -56,7 +56,7 @@ export function makeSkyLUT(renderer, U) {
         vec3 ro = vec3(0.0, Rg + uObsKm, 0.0);
         vec2 top = rs(ro, rd, Rt); vec2 gr = rs(ro, rd, Rg);
         float tMax = top.y; bool ground = gr.x > 0.0; if (ground) tMax = gr.x;
-        tMax = min(tMax, 600.0);
+        tMax = min(tMax, 1200.0);   // a horizontal ray leaves the atmosphere ~1130 km away; twilight glow near the horizon comes from that far, sunlit air
         vec3 L = vec3(0.0), T = vec3(1.0);
         float cs = dot(rd, uSunDir), cm = dot(rd, uMoonDir);
         float bM = uAOD/1.2;

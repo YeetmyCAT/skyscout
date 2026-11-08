@@ -98,13 +98,13 @@ export const RateLimit = {
   weight(url) {
     try {
       const u = new URL(url), q = u.searchParams, locs = (q.get('latitude') || '').split(',').length;
-      const vars = Math.max(1, Math.ceil((q.get('hourly') || '').split(',').filter(Boolean).length / 10));
-      const models = Math.max(1, (q.get('models') || '').split(',').filter(Boolean).length);
-      const days = Math.max(1, Math.ceil(((+q.get('forecast_days') || 7) + (+q.get('past_days') || 0)) / 14));
-      return locs * vars * models * days;
+      // Open-Meteo's formula: locations x (variables x models / 10) x (days / 14), each factor at least 1
+      const nv = (q.get('hourly') || '').split(',').filter(Boolean).length * Math.max(1, (q.get('models') || '').split(',').filter(Boolean).length);
+      const days = (+q.get('forecast_days') || 7) + (+q.get('past_days') || 0);
+      return locs * Math.max(1, nv / 10) * Math.max(1, days / 14);
     } catch { return 1; }
   },
-  record(url) { this.log.push([Date.now(), this.weight(url)]); this.save(); },
+  record(url) { this.load(); this.log.push([Date.now(), this.weight(url)]); this.save(); },   // reload first: other tabs share the log
   // what's left in the hourly and daily windows (the minute window refills within a minute)
   remaining(includeMinute = false) {
     const t = Date.now(); let r = Infinity;
@@ -114,6 +114,8 @@ export const RateLimit = {
   // the service said no: block until its window resets
   blocked(reason) {
     const t = Date.now(), d = new Date(t);
+    // refused although this device has used little: someone else on the same internet connection used the quota
+    this.shared = /daily/i.test(reason) ? this.remaining() > 3000 : /hourly/i.test(reason) ? this.remaining() > 1500 : false;
     // The daily limit is not a midnight-UTC reset (it behaves like a rolling 24 h window), so don't promise a time:
     // pause for an hour, then let the next forecast request check again. A refused request isn't counted.
     if (/daily/i.test(reason)) this.until = t + 3600e3;
@@ -124,6 +126,8 @@ export const RateLimit = {
   waitMs() { return Math.max(0, this.until - Date.now()); },
 };
 RateLimit.load();
+// tabs and the home-screen app on this device share one log (another device can't be seen without a server)
+try { addEventListener('storage', e => { if (e.key === 'ss_om_use' || e.key === 'ss_om_until') RateLimit.load(); }); } catch { }
 const isOpenMeteo = url => /\/\/(api|air-quality-api|ensemble-api)[.]open-meteo[.]com/.test(url);   // the forecast quota (place search is separate)
 
 // JSON with cache: fresh copy within ttl, else network, else stale copy (offline mode).
@@ -133,6 +137,7 @@ export async function cachedJSON(key, url, ttlMs, opts = {}) {
   if (opts.cacheOnly) { if (hit) return { data: hit.data, t: hit.t, stale: true }; throw new Error('not saved'); }
   const om = isOpenMeteo(url);
   if (om && RateLimit.waitMs() > 0) { if (hit) return { data: hit.data, t: hit.t, stale: true }; const e = new Error('rate-limited'); e.rateLimited = true; throw e; }
+  if (om && typeof document !== 'undefined' && document.hidden) { if (hit) return { data: hit.data, t: hit.t, stale: true }; throw new Error('paused while the app is in the background'); }   // an app left open in the background never spends the quota
   try {
     let r;
     for (let attempt = 0; ; attempt++) {
@@ -141,7 +146,7 @@ export async function cachedJSON(key, url, ttlMs, opts = {}) {
       if ((r.status === 429 || r.status === 503 || r.status === 504) && attempt < 3) { await sleep(4000 * (attempt + 1) ** 2); continue; }
       break;
     }
-    if (om) RateLimit.record(url);
+    if (om && r.status !== 429) RateLimit.record(url);   // a refused request isn't counted by the service
     if (r.status === 429) {
       let reason = ''; try { reason = (await r.json()).reason || ''; } catch { }
       if (om) RateLimit.blocked(reason);
