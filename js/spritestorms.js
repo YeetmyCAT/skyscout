@@ -76,14 +76,15 @@ function satComplexes(ir, G) {
 
 // Storm support: cold tops alone can be winter jet-stream cirrus or a frontal cloud shield, which don't rain hard,
 // thunder or make sprites. They count as a storm only with storm conditions in the primary forecast nearby
-// (instability, thunder or a lightning signal) or warm air near the ground (clear ground the satellite sees within
-// ~300 km reads 12 C or more at the 95th percentile, as in summer or the tropics). Without the primary forecast
-// (backup only, or none), warm ground alone decides.
+// (instability, thunder or a lightning signal), a thunder symbol in the backup forecast, or warm air near the ground
+// (clear ground the satellite sees within ~300 km reads 12 C or more at the 95th percentile, as in summer or the
+// tropics). Any one of these confirms; none of them alone is required.
 export const WARM_GROUND_C = 12;
 function forecastSupport(wx, cells, t) {
   if (!wx) return false;
   for (const k of cells) {
-    const S = wx[k]; if (!S || S.backup) continue;   // instability (CAPE) is only in the primary forecast; with the backup, warm ground alone decides
+    const S = wx[k]; if (!S) continue;
+    if (S.backup) { if ((val(S, 'weather_code', t) ?? 0) >= 95) return true; continue; }   // backup (MET Norway, ECMWF-based): its thunder symbol confirms; it has no CAPE
     if ((val(S, 'cape', t) ?? 0) >= 150 || (val(S, 'weather_code', t) ?? 0) >= 95 || (val(S, 'lightning_potential', t) ?? 0) > 0) return true;
   }
   return false;
