@@ -77,6 +77,35 @@ function gridMesh(N, half, hfn, holeHalf, drop, local) {
   return g;
 }
 
+// Water surface levels from a water mask. Elevation tiles show the surface of lakes (and of the Dead Sea and the
+// Salton Sea) but the floor of seas (the ocean, the North Sea, the Caspian). Each water pixel gets the height of the
+// lowest nearby shore (shore heights spread inward, the lowest winning), used only where the tiles go well below
+// that and below sea level, so lakes and rivers above sea level (even in canyons) and dry land are never changed.
+function waterLevels(P, half, field, local) {
+  if (!P || !field || !field.ok) return null;
+  const n = P.width, N = n * n, wet = new Uint8Array(N);
+  for (let i = 0; i < N; i++) wet[i] = P.data[i * 4] > 128 ? 1 : 0;
+  const lev = new Float32Array(N).fill(NaN), dist = new Int32Array(N).fill(-1), q = new Int32Array(N);
+  const hAt = k => { const x = ((k % n) + 0.5) / n * 2 * half - half, z = (Math.floor(k / n) + 0.5) / n * 2 * half - half; const [la, lo] = local.toLL(x, -z); return field.sample(la, lo); };
+  const nb = [1, -1, n, -n];
+  let qt = 0;
+  for (let k = 0; k < N; k++) {
+    if (!wet[k]) continue;
+    const x = k % n; let m = Infinity;
+    for (let d = 0; d < 4; d++) { const kk = k + nb[d]; if (kk < 0 || kk >= N || (d === 0 && x === n - 1) || (d === 1 && x === 0)) continue; if (!wet[kk]) { const h = hAt(kk); if (Number.isFinite(h)) m = Math.min(m, h); } }
+    if (m < Infinity) { lev[k] = m; dist[k] = 0; q[qt++] = k; }
+  }
+  for (let qh = 0; qh < qt; qh++) {
+    const k = q[qh], x = k % n;
+    for (let d = 0; d < 4; d++) {
+      const kk = k + nb[d]; if (kk < 0 || kk >= N || (d === 0 && x === n - 1) || (d === 1 && x === 0) || !wet[kk]) continue;
+      if (dist[kk] < 0) { dist[kk] = dist[k] + 1; lev[kk] = lev[k]; q[qt++] = kk; }
+      else if (dist[kk] > dist[k] && lev[k] < lev[kk]) lev[kk] = lev[k];
+    }
+  }
+  return { n, lev };
+}
+
 export class Ground {
   constructor(U, local, groundZ, quality) {
     this.U = U; this.local = local; this.groundZ = groundZ; this.q = quality; this.group = new THREE.Group();
@@ -93,11 +122,16 @@ export class Ground {
     this.hn = hn; this.hm = hm; this.hf = hf;
     if (hn.ok) { const z = hn.sample(lat, lon); if (isFinite(z) && z > -500) this.groundZ = z; }
     const gz = this.groundZ;
-    // Elevation tiles carry sea-floor depths. Open water is shown at its surface instead: sea level, or the level of a
-    // shore that is itself below sea level (the Dead Sea). Dry land below sea level (polders, Death Valley) is left as it
-    // is. Water = the mapped water masks (filled in below, before the meshes are built), or deeper than 200 m.
-    this.wlev = Math.min(0, gz);
-    const H = s => (x, z) => { const [la, lo] = local.toLL(x, -z); let e = s.sample(la, lo); if (e < this.wlev && (e < -200 || this.maskWater(x, z))) e = this.wlev; return e - this.groundZ; };
+    // Elevation tiles carry sea-floor depths: seas are shown at their surface instead (see waterLevels: the ocean ~0 m,
+    // the Caspian ~-28 m), while the Dead Sea, the Salton Sea, lakes, rivers and all dry land keep their heights.
+    // Unmapped spots deeper than 450 m (below any land on Earth; the lowest is the Dead Sea shore, -441 m) are open
+    // ocean, at sea level. Levels are filled in below, before the meshes are built.
+    const H = s => (x, z) => {
+      const [la, lo] = local.toLL(x, -z); let e = s.sample(la, lo);
+      const lv = this.waterLevel(x, z);
+      if (lv != null) { if (e < 0 && e < lv - 3) e = Math.min(lv, 0); } else if (e < -450) e = 0;
+      return e - this.groundZ;
+    };
     this.heightAt = (x, z) => { const ax = Math.abs(x), az = Math.abs(z); const s = ax < this.nearHalf * 1.4 && az < this.nearHalf * 1.4 ? hn : ax < this.midHalf * 1.4 && az < this.midHalf * 1.4 ? hm : hf; return H(s)(x, z) - curveDrop(Math.hypot(x, z)); };
     progress('Loading aerial imagery…');
     const big = this.q.mobile ? 1536 : 2048;
@@ -107,8 +141,9 @@ export class Ground {
     const px = c => c ? c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height) : null;
     if (wn) this.waterPx = px(wn);
     this.waterPxM = px(wm); this.waterPxF = px(wf);
-    // standing on shallow sea: the depth under us isn't our ground level, the sea surface is
-    if (this.groundZ < 0 && this.groundZ > -350 && this.maskWater(0, 0)) { this.groundZ = 0; this.wlev = 0; }
+    this.levN = waterLevels(this.waterPx, this.nearHalf, hn, local); this.levM = waterLevels(this.waterPxM, this.midHalf, hm, local); this.levF = waterLevels(this.waterPxF, this.farHalf, hf, local);
+    // standing on water: the depth under us isn't our ground level, the water's surface is
+    { const lv = this.waterLevel(0, 0); if (lv != null && this.groundZ < 0 && this.groundZ < lv - 3) this.groundZ = Math.min(lv, 0); }
     this.nearCanvas = cn;
     const mask = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.minFilter = THREE.LinearFilter; t.generateMipmaps = false; return t; };
     const tex = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.anisotropy = 8; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; return t; };
@@ -142,14 +177,13 @@ export class Ground {
     const i = Math.floor((x + this.nearHalf) / (2 * this.nearHalf) * M.width), j = Math.floor((z + this.nearHalf) / (2 * this.nearHalf) * M.height);
     return M.data[(Math.min(M.height - 1, j) * M.width + Math.min(M.width - 1, i)) * 4] > 128;
   }
-  // Water in the mapped masks (near, mid and far rings), for putting the terrain at the water's surface
-  maskWater(x, z) {
-    const look = (P, half) => { if (!P || Math.abs(x) >= half || Math.abs(z) >= half) return null;
-      const i = Math.floor((x + half) / (2 * half) * P.width), j = Math.floor((z + half) / (2 * half) * P.height);
-      return P.data[(Math.min(P.height - 1, Math.max(0, j)) * P.width + Math.min(P.width - 1, Math.max(0, i))) * 4] > 128; };
-    const a = look(this.waterPx, this.nearHalf); if (a != null) return a;
-    const b = look(this.waterPxM, this.midHalf); if (b != null) return b;
-    return !!look(this.waterPxF, this.farHalf);
+  // Surface level (m) of mapped water at (x, z), or null on land / outside the masks (near, mid, far rings)
+  waterLevel(x, z) {
+    const look = (L, half) => { if (!L || Math.abs(x) >= half || Math.abs(z) >= half) return undefined;
+      const i = Math.min(L.n - 1, Math.floor((x + half) / (2 * half) * L.n)), j = Math.min(L.n - 1, Math.floor((z + half) / (2 * half) * L.n));
+      const v = L.lev[j * L.n + i]; return Number.isNaN(v) ? null : v; };
+    for (const [L, half] of [[this.levN, this.nearHalf], [this.levM, this.midHalf], [this.levF, this.farHalf]]) { const v = look(L, half); if (v !== undefined) return v; }
+    return null;
   }
   // Is (x, z) open water? Aerial photo colour (dark, blue-leaning) on dead-flat terrain, or inside mapped OSM water.
   isWater(x, z) {
