@@ -93,14 +93,22 @@ export class Ground {
     this.hn = hn; this.hm = hm; this.hf = hf;
     if (hn.ok) { const z = hn.sample(lat, lon); if (isFinite(z) && z > -500) this.groundZ = z; }
     const gz = this.groundZ;
-    const H = s => (x, z) => { const [la, lo] = local.toLL(x, -z); return s.sample(la, lo) - gz; };
+    // Elevation tiles carry sea-floor depths. Open water is shown at its surface instead: sea level, or the level of a
+    // shore that is itself below sea level (the Dead Sea). Dry land below sea level (polders, Death Valley) is left as it
+    // is. Water = the mapped water masks (filled in below, before the meshes are built), or deeper than 200 m.
+    this.wlev = Math.min(0, gz);
+    const H = s => (x, z) => { const [la, lo] = local.toLL(x, -z); let e = s.sample(la, lo); if (e < this.wlev && (e < -200 || this.maskWater(x, z))) e = this.wlev; return e - this.groundZ; };
     this.heightAt = (x, z) => { const ax = Math.abs(x), az = Math.abs(z); const s = ax < this.nearHalf * 1.4 && az < this.nearHalf * 1.4 ? hn : ax < this.midHalf * 1.4 && az < this.midHalf * 1.4 ? hm : hf; return H(s)(x, z) - curveDrop(Math.hypot(x, z)); };
     progress('Loading aerial imagery…');
     const big = this.q.mobile ? 1536 : 2048;
     const [cn, cm, cf] = await Promise.all([imageryCanvas(local, this.nearHalf, 14, big).catch(() => null), imageryCanvas(local, this.midHalf, 10, big).catch(() => null), imageryCanvas(local, this.farHalf, 7, 1024).catch(() => null)]);
     progress('Mapping lakes and rivers…');
-    const [wn, wm] = await Promise.all([waterMaskCanvas(local, this.nearHalf, 14, 1024), waterMaskCanvas(local, this.midHalf, 11, 1024)]);
-    if (wn) { const g = wn.getContext('2d', { willReadFrequently: true }); this.waterPx = g.getImageData(0, 0, wn.width, wn.height); }
+    const [wn, wm, wf] = await Promise.all([waterMaskCanvas(local, this.nearHalf, 14, 1024), waterMaskCanvas(local, this.midHalf, 11, 1024), waterMaskCanvas(local, this.farHalf, 8, 1024)]);
+    const px = c => c ? c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height) : null;
+    if (wn) this.waterPx = px(wn);
+    this.waterPxM = px(wm); this.waterPxF = px(wf);
+    // standing on shallow sea: the depth under us isn't our ground level, the sea surface is
+    if (this.groundZ < 0 && this.groundZ > -350 && this.maskWater(0, 0)) { this.groundZ = 0; this.wlev = 0; }
     this.nearCanvas = cn;
     const mask = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.minFilter = THREE.LinearFilter; t.generateMipmaps = false; return t; };
     const tex = c => { if (!c) return null; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.anisotropy = 8; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; return t; };
@@ -133,6 +141,15 @@ export class Ground {
     if (!M || Math.abs(x) > this.nearHalf || Math.abs(z) > this.nearHalf) return null;
     const i = Math.floor((x + this.nearHalf) / (2 * this.nearHalf) * M.width), j = Math.floor((z + this.nearHalf) / (2 * this.nearHalf) * M.height);
     return M.data[(Math.min(M.height - 1, j) * M.width + Math.min(M.width - 1, i)) * 4] > 128;
+  }
+  // Water in the mapped masks (near, mid and far rings), for putting the terrain at the water's surface
+  maskWater(x, z) {
+    const look = (P, half) => { if (!P || Math.abs(x) >= half || Math.abs(z) >= half) return null;
+      const i = Math.floor((x + half) / (2 * half) * P.width), j = Math.floor((z + half) / (2 * half) * P.height);
+      return P.data[(Math.min(P.height - 1, Math.max(0, j)) * P.width + Math.min(P.width - 1, Math.max(0, i))) * 4] > 128; };
+    const a = look(this.waterPx, this.nearHalf); if (a != null) return a;
+    const b = look(this.waterPxM, this.midHalf); if (b != null) return b;
+    return !!look(this.waterPxF, this.farHalf);
   }
   // Is (x, z) open water? Aerial photo colour (dark, blue-leaning) on dead-flat terrain, or inside mapped OSM water.
   isWater(x, z) {
