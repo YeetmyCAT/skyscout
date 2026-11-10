@@ -212,6 +212,8 @@ export function makeSkyBackground(U, mwTex) {
       }
       // magnetic shell value (km): constant along a dipole field line, so a curtain that follows the field is a
       // surface of constant L, leaning equatorward with height like real curtains (not a vertical wall)
+      float fbmA(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 3; i++){ s += a*vnoise(p); p = p*2.03 + 17.1; a *= 0.5; } return s; }
+      float erfA(float x){ float x2 = x*x, e = sqrt(1.0 - exp(-x2*(1.2732395 + 0.147*x2)/(1.0 + 0.147*x2))); return x < 0.0 ? -e : e; }
       float auroraL(vec3 P, vec3 A){ float r = length(P), s = dot(P, A)/r; return r/max(1.0 - s*s, 1e-4); }
       // how close an Earth-fixed point is to the arcs actually showing (their magnetic latitudes and lit segments):
       // the diffuse green glow surrounds the aurora instead of filling the whole region where aurora is possible
@@ -263,61 +265,62 @@ export function makeSkyBackground(U, mwTex) {
           float grAcc = 0.0, redAcc = 0.0, pinkAcc = 0.0;
           // where the ray is inside the emitting heights (85-420 km), and a start point at 130 km
           float bR = dot(O, dE), cR = dot(O, O);
-          float tLo = -bR + sqrt(max(bR*bR - (cR - 6456.0*6456.0), 0.0));
-          float tHi = -bR + sqrt(max(bR*bR - (cR - 6791.0*6791.0), 0.0));
-          float tMid = -bR + sqrt(max(bR*bR - (cR - 6501.0*6501.0), 0.0));
+          // Step along the ray through the emitting heights (85-420 km) and, on each step, integrate exactly how much
+          // of the curtain's Gaussian thickness the ray passes through (erf of the distance to the curtain's
+          // field-line surface at both ends of the step). Folds, grazing views and several crossings all come out
+          // continuous: no seams where a search would jump between folds.
+          const int NS = 12;
+          float tS[NS], LS[NS], mS[NS];
+          for (int k = 0; k < NS; k++) {
+            float R = 6456.0 + 335.0*pow(float(k)/float(NS - 1), 1.7);   // denser low down, where the green is
+            tS[k] = -bR + sqrt(max(bR*bR - (cR - R*R), 0.0));
+            vec3 Pk = O + dE*tS[k], Pkn = normalize(Pk);
+            LS[k] = auroraL(Pk, A); mS[k] = atan(dot(Pkn, refB), dot(Pkn, refA));
+          }
+          float mRef; { float tr = -bR + sqrt(max(bR*bR - (cR - 6481.0*6481.0), 0.0)); vec3 Pr = normalize(O + dE*tr); mRef = atan(dot(Pr, refB), dot(Pr, refA)); }
+          const float thick = 7.0;                                          // km (1-sigma), fuzzy
           for (int i = 0; i < 5; i++) {
             float fi = float(i), lat0 = uAurora.x + (fi - 2.0)*uAurora.y;   // arcs spread across the oval
-            float tFirst = -1e9;
-            for (int w = 0; w < 2; w++) {                                 // near and far crossing of the sheet
-              // the unfolded arc only finds where along the ray to look: its height window is wider than the
-              // emitting layer's, or the folded curtain's lower part gets cut off in a hard line
-              float t = auroraSheet(O, dE, A, lat0, hemi, w, 40.0, 600.0);
-              if (t < 0.0) { if (w == 1) continue; t = tMid; }            // e.g. looking up from under a leaning curtain
-              vec3 Pn = normalize(O + dE*t);
-              float mlon = atan(dot(Pn, refB), dot(Pn, refA));
-              // folds: large slow meanders plus small fast curls
-              float fold = 0.009*(fbm2(vec2(mlon*7.0 + fi*3.1, tt*0.004*(1.0 + 3.0*act))) - 0.5)
-                         + 0.0025*(vnoise(vec2(mlon*45.0 - tt*0.02*(1.0 + 4.0*act), fi*5.0)) - 0.5);
-              // the curtain's field-line surface (anchored at 110 km); find where the ray comes closest to it inside
-              // the emitting heights (Newton steps), then let its few-km thickness decide how much light we get:
-              // no hard edges, and seen from below it is a soft band, not a line
-              float c0 = cos(lat0 + fold), Ls = 6481.0/max(c0*c0, 1e-4);
-              float dL = 1.0;
-              for (int k = 0; k < 4; k++) {
-                float f0 = auroraL(O + dE*t, A) - Ls;
-                dL = 0.5*(auroraL(O + dE*(t + 1.0), A) - auroraL(O + dE*(t - 1.0), A));
-                t = clamp(t - f0/(abs(dL) > 1e-3 ? dL : (dL >= 0.0 ? 1e-3 : -1e-3)), tLo, tHi);
+            float cl = cos(lat0), wL = 6481.0/(cl*cl)*2.0*tan(lat0)*thick/6481.0;   // thickness in L units
+            float aG = 0.0, aR = 0.0, aP = 0.0, aT = 0.0, fPrev = 0.0;
+            // small fast curls (~60 km): taken once per line of sight (where it crosses 110 km), so steps far apart
+            // don't draw them as kinked straight segments
+            float curl = 0.0025*(vnoise(vec2(mRef*45.0 - tt*0.02*(1.0 + 4.0*act), fi*5.0)) - 0.5);
+            for (int k = 0; k < NS; k++) {
+              // folds: large slow meanders (on the curtain's own position along the arc) plus the small curls
+              float fold = 0.009*(fbmA(vec2(mS[k]*7.0 + fi*3.1, tt*0.004*(1.0 + 3.0*act)))*1.107 - 0.5) + curl;
+              float c0 = cos(lat0 + fold);
+              float f = (LS[k] - 6481.0/max(c0*c0, 1e-4))/wL;           // distance to the curtain, in thicknesses
+              if (k > 0 && (fPrev*f < 0.0 || min(abs(fPrev), abs(f)) < 3.5)) {
+                float dt = tS[k] - tS[k - 1], df = f - fPrev;
+                float inC = abs(df) < 1e-3 ? dt*exp(-f*f) : dt*0.886227*(erfA(f) - erfA(fPrev))/df;   // km inside
+                if (inC > 0.02) {
+                  float sc = fPrev*f < 0.0 ? fPrev/(fPrev - f) : (abs(fPrev) <= abs(f) ? 0.0 : 1.0);
+                  float t = mix(tS[k - 1], tS[k], sc);
+                  vec3 Pn = normalize(O + dE*t);
+                  float mlon = atan(dot(Pn, refB), dot(Pn, refA)), h = length(O + dE*t) - 6371.0;
+                  float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlon*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));   // arcs come in segments
+                  float amp = (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg;
+                  float kR = amp < 0.01 ? 0.0 : auroraKR(O + dE*t, kp);
+                  if (kR > 0.0) {
+                    // rays follow the magnetic field, so they vary only along the arc: soft streaks that slide and flicker
+                    float rx = mlon*1400.0;
+                    float rays = 0.55 + 0.35*vnoise(vec2(rx - tt*(0.6 + 2.5*act), fi*11.0)) + 0.3*vnoise(vec2(rx*0.23 + tt*0.25*act, fi*3.0 + 1.0));
+                    float hb = 102.0 + 10.0*vnoise(vec2(mlon*60.0, fi*2.0 + tt*0.01));
+                    float gP = smoothstep(hb - 12.0, hb + 4.0, h) * exp(-max(h - hb, 0.0)/(40.0 + 15.0*rays));   // fuzzy lower edge
+                    float rP = exp(-pow((h - 230.0)/65.0, 2.0));
+                    float pP = exp(-pow((h - hb + 2.0)/4.0, 2.0));
+                    float pulse = 1.0 + 0.35*act*sin(tt*(1.3 + fi) + mlon*30.0);
+                    float I = 0.6*amp*rays*pulse*kR*inC/(2.0*1.7725*thick);   // face-on matches the old sheet brightness
+                    aG += I*gP; aR += I*rP; aP += I*pP;
+                  }
+                  aT += inC;
+                }
               }
-              // the far crossing can settle on the same spot as the near one: count that curtain once
-              if (w == 1 && abs(t - tFirst) < 3.0) continue;
-              if (w == 0) tFirst = t;
-              float Lt = auroraL(O + dE*t, A);
-              dL = 0.5*(auroraL(O + dE*(t + 1.0), A) - auroraL(O + dE*(t - 1.0), A));
-              const float thick = 7.0;                                       // km (1-sigma), fuzzy
-              float wL = Ls*2.0*tan(lat0)*thick/6481.0;                      // that thickness in L units
-              float G = exp(-pow((Lt - Ls)/wL, 2.0));
-              if (G < 0.002) continue;
-              Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA));
-              float h = length(O + dE*t) - 6371.0;
-              // km of the curtain along the ray: ~thickness face-on, longer obliquely, capped edge-on
-              float path = 1.0/sqrt(pow(dL/(1.7725*wL), 2.0) + 1.0/3600.0);
-              float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlon*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));   // arcs come in segments
-              float amp = (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg;
-              if (amp < 0.01) continue;
-              float kR = auroraKR(O + dE*t, kp); if (kR <= 0.0) continue;
-              // rays follow the magnetic field, so they vary only along the arc: vertical streaks that slide and flicker
-              float rx = mlon*1400.0;
-              // soft rays (real curtains are striated but fuzzy, not sharp lines)
-              float rays = 0.55 + 0.35*vnoise(vec2(rx - tt*(0.6 + 2.5*act), fi*11.0)) + 0.3*vnoise(vec2(rx*0.23 + tt*0.25*act, fi*3.0 + 1.0));
-              float hb = 102.0 + 10.0*vnoise(vec2(mlon*60.0, fi*2.0 + tt*0.01));
-              float gP = smoothstep(hb - 12.0, hb + 4.0, h) * exp(-max(h - hb, 0.0)/(40.0 + 15.0*rays));   // fuzzy lower edge
-              float rP = exp(-pow((h - 230.0)/65.0, 2.0));
-              float pP = exp(-pow((h - hb + 2.0)/4.0, 2.0));
-              float pulse = 1.0 + 0.35*act*sin(tt*(1.3 + fi) + mlon*30.0);
-              float I = 0.6*amp*rays*pulse*kR*G*path/(2.0*1.7725*thick);   // face-on matches the old sheet brightness
-              grAcc += I*gP; redAcc += I*rP; pinkAcc += I*pP;
+              fPrev = f;
             }
+            float cap = inversesqrt(1.0 + aT*aT/3600.0);                    // seen edge-on: capped near 60 km of curtain
+            grAcc += aG*cap; redAcc += aR*cap; pinkAcc += aP*cap;
           }
           // faint diffuse glow just equatorward of the arcs
           {
@@ -538,8 +541,9 @@ export function makeMoon(U) {
         c *= mix(min(1.0, 3.5/max(peak, 1e-6)), 1.0, uMoonCam);
         // camera: glare from lens and sensor around the overexposed Moon, scaled by its total light
         if (uMoonCam > 0.0) {
-          float d = max(length(q), 1.0);
-          c += vec3(1.0, 0.95, 0.88) * uMoonAvg * T * uExposure * 0.02 * exp(-(d - 1.0)*1.2)/(d*d) * uMoonCam * step(1.0, length(q));
+          // fades in exactly as the disc's soft limb fades out, so there is no dark ring between them
+          float d = max(length(q), 1.0), under = 1.0 - smoothstep(1.0, 0.96, min(r2, 1.0));
+          c += vec3(1.0, 0.95, 0.88) * uMoonAvg * T * uExposure * 0.02 * exp(-(d - 1.0)*1.2)/(d*d) * uMoonCam * under;
         }
         gl_FragColor = vec4(min(c * smoothstep(-0.01, 0.005, uMoonDir.y), vec3(3.0e4)), 1.0);
       }`,
