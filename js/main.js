@@ -169,9 +169,11 @@ let selToken = 0;
 // Picking a place only shows it; the forecast is fetched when asked (saves the free service's quota).
 async function selectLocation(lat, lon, name, restoring) {
   const tok = ++selToken;
+  // a click on a repeated copy of the world reports longitudes past ±180°, which the weather service rejects (HTTP 400)
+  const mapLon = lon; lon = ((lon + 180) % 360 + 360) % 360 - 180;
   S.sel = { lat, lon, name: name || `${lat.toFixed(3)}, ${lon.toFixed(3)}` };
   S.data = null;
-  map.select(lat, lon); save();
+  map.select(lat, mapLon); save();
   if (!restoring && innerWidth <= 820) $('#panel').classList.remove('min');
   const box = $('#tab-cond');
   box.innerHTML = `<div class="place">${S.sel.name}</div><div class="sub">${lat.toFixed(4)}, ${lon.toFixed(4)}</div>
