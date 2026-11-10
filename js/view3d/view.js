@@ -10,7 +10,8 @@ import { Structures } from './structures.js';
 import { Farms, CROP_NAMES } from './farms.js';
 import { Precip, Lightning, FarStorms, WxAudio } from './weatherfx.js';
 import { Overlays } from './overlays.js';
-import { sunMoon, planets as planetPos, altAzToVec, vecToAltAz, eqjToWorld, observer, EQ2GAL, OBLIQ, phaseName } from '../astro.js';
+import { sunMoon, planets as planetPos, altAzToVec, vecToAltAz, eqjToWorld, observer, EQ2GAL, OBLIQ, phaseName, refraction, refractionK } from '../astro.js';
+import { refrUniform } from './glsl.js';
 import { val, cloudLayers, precipState, fogRisk, idxAt } from '../weather.js';
 import { groundFluxGrid, NAT_SKY, lum2mag } from '../lightpol.js';
 import { clamp, smooth, lerp, DEG, curveDrop } from '../util.js';
@@ -58,7 +59,7 @@ export class Immersive {
     this.yaw = 180; this.pitch = 15; this.fov = 70; this.eye = 1.7; this.walk = new THREE.Vector3();
     const U = this.U = {
       uSkyLUT: { value: null }, uSkyLUTLow: { value: null }, uExposure: { value: 1 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
-      uSunE: { value: new THREE.Vector3() }, uMoonE: { value: new THREE.Vector3() }, uAOD: { value: 0.12 }, uTime: { value: 0 }, uAurT: { value: 0 }, uNight: { value: 0 },
+      uSunE: { value: new THREE.Vector3() }, uMoonE: { value: new THREE.Vector3() }, uAOD: { value: 0.12 }, uTime: { value: 0 }, uAurT: { value: 0 }, uRefrK: refrUniform, uSunSquish: { value: 1 }, uMoonSquish: { value: 1 }, uNight: { value: 0 },
       uSnow: { value: 0 }, uWet: { value: 0 }, uOvercast: { value: 0 }, uVisKm: { value: 40 }, uFlash: { value: new THREE.Vector4() }, uLogFar: { value: Math.log2(2.2e6 + 1) },
       uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() },
       uLitFrac: { value: 0.5 }, uLeafFrac: { value: 1 }, uAutumn: { value: 0 }, uSpring: { value: 0 }, uGreen: { value: 1 }, uLeafOff: { value: 0 }, uCrop: { value: new THREE.Vector4() },
@@ -238,14 +239,31 @@ export class Immersive {
   }
   setStormForecast(data) { this.farAuto = null; this.stormField = data && data.stormAt ? data : null; this.farStorms.setForecast(data, this.ctx.lat, this.ctx.lon); this.farStorms.atTime(this.unix); if (this.stormField) { this.lastWxKey = null; this.applyWeather(true); } this.updateLabels(); }
 
+  // Refraction strength from the air at the viewer: the forecast's surface pressure and temperature (at the model's
+  // ground height), carried to the viewer's own height (pressure falls ~12 %/km, temperature 6.5 C/km), so it is
+  // weaker on a mountain; a standard atmosphere when there is no forecast.
+  updateRefrK() {
+    const ctx = this.ctx || {}, pt = ctx.point, t = this.unix, z = (ctx.groundZ || 0) + (this.eye || 1.7);
+    let P = pt ? val(pt, 'surface_pressure', t) : null, T = pt ? val(pt, 'temperature_2m', t) : null, z0 = pt && pt.elevation != null ? pt.elevation : (ctx.groundZ || 0);
+    if (P == null) { P = 1013.25; z0 = 0; }
+    if (T == null) T = 15 - 0.0065 * z0;
+    const dz = z - z0, Tz = T - 0.0065 * dz, Pz = P * Math.pow(Math.max(0.2, 1 - 0.0065 * dz / (T + 273.15)), 5.2559);
+    const k = refractionK(Pz, Tz);
+    refrUniform.value = Number.isFinite(k) ? Math.max(0.3, Math.min(1.3, k)) : 1;
+    return refrUniform.value;
+  }
   // ---------- time ----------
   setTime(date, force) {
     this.date = date; this.unix = date.getTime() / 1000;
     const { lat, lon, groundZ } = this.ctx, U = this.U;
     const sm = sunMoon(date, lat, lon, groundZ);
     this.sm = sm; this.overlays.sunAlt = sm.sun.alt;
-    const sv = altAzToVec(sm.sun.alt, sm.sun.az), mv = altAzToVec(sm.moon.alt, sm.moon.az);
+    // seen positions: refraction lifts the Sun and Moon near the horizon (the Sun still shows, and lights the sky
+    // and land, for a few minutes after it has truly set) and squashes them vertically
+    const k = this.updateRefrK(), lift = h => refraction(h, k), squish = h => Math.max(0.3, Math.min(1, 1 + (lift(h + 0.1) - lift(h - 0.1)) / 0.2));
+    const sv = altAzToVec(sm.sun.alt + lift(sm.sun.alt), sm.sun.az), mv = altAzToVec(sm.moon.alt + lift(sm.moon.alt), sm.moon.az);
     U.uSunDir.value.set(...sv); U.uMoonDir.value.set(...mv);
+    U.uSunSquish.value = squish(sm.sun.alt); U.uMoonSquish.value = squish(sm.moon.alt);
     U.uSunE.value.set(1.0, 0.985, 0.95).multiplyScalar(1.27e5);
     const moonLux = Math.pow(10, -0.4 * (sm.moonMag + 13.99));
     U.uMoonE.value.set(1.0, 0.94, 0.86).multiplyScalar(moonLux);
@@ -715,10 +733,11 @@ export class Immersive {
   }
   updateLabels() {
     const d = [];
-    for (const p of this.pl || []) if (p.alt > -1) d.push({ t: p.name, alt: p.alt + 0.8, az: p.az, cls: 'planet' });
+    const rk = refrUniform.value;
+    for (const p of this.pl || []) if (p.alt > -1) d.push({ t: p.name, alt: p.alt + refraction(p.alt, rk) + 0.8, az: p.az, cls: 'planet' });
     if (this.kpNow != null && this.U.uAurora.value.z > 0 && this.sm.sun.alt < -10) d.push({ t: `Aurora: up to ${this.auroraOval ? this.auroraOval.near : 0}% chance nearby (${this.auroraLive ? 'NOAA OVATION now' : `Kp ${this.kpNow.toFixed(1)}${this.date && this.date.getTime() > Date.now() + 1800e3 ? ' forecast' : ''}`})`, alt: 8, az: (this.ctx.lat >= 0 ? 0 : 180), cls: 'dome', always: false });
-    if (this.sm.moon.alt > -1) d.push({ t: 'Moon', alt: this.sm.moon.alt + 1.2, az: this.sm.moon.az, cls: 'planet' });
-    if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
+    if (this.sm.moon.alt > -1) d.push({ t: 'Moon', alt: this.sm.moon.alt + refraction(this.sm.moon.alt, rk) + 1.2, az: this.sm.moon.az, cls: 'planet' });
+    if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + refraction(this.sm.sun.alt, rk) + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
     for (const dm of this.ctx.domes || []) d.push({ t: `${dm.name || 'Light dome'} glow`, alt: 3 + dm.strength * 4, az: dm.az, cls: 'dome', dome: true });
     const storms = this.farStorms.forecast ? this.farStorms.storms : (this.ctx.sprites || []);
     for (const s of storms) d.push({ t: `⚡ Storm ${Math.round(s.distKm)} km — sprites ~${(s.spriteAlt ?? 10).toFixed(0)}° up`, alt: Math.max(2, (s.spriteAlt ?? 10) * 0.7), az: s.az, cls: 'storm', always: true });

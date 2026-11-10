@@ -43,7 +43,7 @@ export class SkyEvents {
         attribute float aI; attribute vec3 aC; out vec3 vC; uniform float uPxSr;
         #include <logdepthbuf_pars_vertex>
         void main(){
-          vec3 d = normalize(position);
+          vec3 d = refrApparent(normalize(position));   // raised by refraction near the horizon
           // train brightness: aI is illuminance (lux) per pixel length; extinction toward the horizon
           vC = aC * aI * directT(max(d.y, 0.0)) / (uPxSr * 1.5) * uExposure * smoothstep(-0.01, 0.02, d.y);
           gl_Position = projectionMatrix * viewMatrix * vec4(d*1.0e6 + cameraPosition, 1.0);

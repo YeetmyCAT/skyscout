@@ -1,7 +1,7 @@
 // Physically based sky: single + approximate multiple scattering for Sun and Moon (Rayleigh, Mie, ozone, Earth's
 // shadow), artificial skyglow from the light-pollution model, airglow, zodiacal light; then stars, planets, Milky Way, Moon.
 import * as THREE from '../../vendor/three.module.min.js';
-import { COMMON } from './glsl.js';
+import { COMMON, REFR } from './glsl.js';
 
 const FSQ = new THREE.BufferGeometry();
 FSQ.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
@@ -12,7 +12,7 @@ export function makeSkyLUT(renderer, U) {
   const mat = new THREE.ShaderMaterial({
     uniforms: U, depthTest: false, depthWrite: false,
     vertexShader: `out vec2 vUv; void main(){ vUv = position.xy*0.5+0.5; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
-    fragmentShader: /* glsl */`
+    fragmentShader: REFR + /* glsl */`
       #define PI 3.14159265
       in vec2 vUv;
       uniform vec3 uSunDir, uMoonDir, uSunE, uMoonE;
@@ -79,7 +79,9 @@ export function makeSkyLUT(renderer, U) {
           T *= stepT;
         }
         // Natural night sky: airglow (van Rhijn brightening toward the horizon), zodiacal light, diffuse starlight
-        float hp = max(h, 0.0);
+        // airglow and zodiacal light are beyond the refracting air: work them out at the true direction
+        vec3 rdT = refrTrue(rd);
+        float hp = max(asin(clamp(rdT.y, -1.0, 1.0)), 0.0);
         float vr = 1.0/sqrt(1.0 - 0.96*cos(hp)*cos(hp));
         float X = 1.0/(sin(hp) + 0.025*exp(-11.0*sin(hp)));
         float extn = exp(-0.25*min(X, 30.0));
@@ -113,8 +115,8 @@ export function makeSkyLUT(renderer, U) {
         vec3 airglow = (vec3(0.55, 1.0, 0.5) * 0.36 * vr * waves + vec3(1.0, 0.25, 0.2) * 0.07 * vrR) * uNatSky * extn;
         // Zodiacal light from the dust in the ecliptic: brightness in S10 units fitted to Leinert et al. (1998),
         // falling away from the Sun and from the ecliptic, with the gegenschein opposite the Sun.
-        vec3 ecl = uEclip * rd; float beta = abs(asin(clamp(ecl.z,-1.0,1.0)))*57.2958;
-        float elong = max(acos(clamp(dot(rd, uSunDir), -1.0, 1.0))*57.2958, 12.0);
+        vec3 ecl = uEclip * rdT; float beta = abs(asin(clamp(ecl.z,-1.0,1.0)))*57.2958;
+        float elong = max(acos(clamp(dot(rdT, uSunDir), -1.0, 1.0))*57.2958, 12.0);
         float s0 = elong < 90.0 ? 430.0*pow(90.0/elong, 1.9) : 200.0 + 230.0*exp(-(elong - 90.0)/25.0) + 60.0*exp(-pow((180.0 - elong)/10.0, 2.0));
         float S10 = 60.0 + (s0 - 60.0)*exp(-beta/(12.0 + 0.15*elong));
         vec3 zodiacal = vec3(1.0, 0.96, 0.88) * uNatSky * S10/300.0 * extn;
@@ -185,7 +187,7 @@ export function makeSkyBackground(U, mwTex) {
     vertexShader: `out vec3 vDir; uniform mat4 uInvProjView; uniform vec3 uCamPos;
       void main(){ vec4 w = uInvProjView * vec4(position.xy, 1.0, 1.0); vDir = w.xyz/w.w - uCamPos; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform sampler2D uAurP; uniform vec3 uObsECEF, uMagAxis; uniform float uAurT;
+      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform sampler2D uAurP; uniform vec3 uObsECEF, uMagAxis; uniform float uAurT, uSunSquish;
       // Distance along the ray to a surface of constant magnetic latitude phi (a cone about the dipole axis A) at
       // auroral heights; which = 0 nearer crossing, 1 farther. -1 if none.
       // aurora brightness (kR) where a ray meets the emitting layer, from NOAA-style chance of aurora at that spot:
@@ -229,10 +231,14 @@ export function makeSkyBackground(U, mwTex) {
       }
       void main(){
         vec3 d = normalize(vDir);
+        vec3 dT = refrTrue(d);     // where this line of sight points without the atmosphere's bending
         vec3 col = skyL(d);
         float sh = d.y;
-        // Sun disc with limb darkening, reddened by extinction
-        float cs = dot(d, uSunDir), r = acos(clamp(cs, -1.0, 1.0));
+        // Sun disc with limb darkening, reddened by extinction; squashed vertically near the horizon (refraction
+        // lifts its lower edge more than its upper edge)
+        vec3 sV = vec3(0.0, 1.0, 0.0) - uSunDir*uSunDir.y; sV = dot(sV, sV) > 1e-8 ? normalize(sV) : vec3(1.0, 0.0, 0.0);
+        vec3 sH = cross(uSunDir, sV);
+        float r = atan(length(vec2(dot(d, sH), dot(d, sV)/uSunSquish)), dot(d, uSunDir));
         float R = 0.00465;
         if (r < R*1.6 && sh > -0.02) {
           float mu = sqrt(max(0.0, 1.0 - (r/R)*(r/R)));
@@ -241,7 +247,7 @@ export function makeSkyBackground(U, mwTex) {
         }
         // Milky Way from an all-sky photograph (ESO/S. Brunier), stars removed, mapped in galactic coordinates
         // (coordinates and their screen derivatives outside the branch, where derivatives are well defined)
-        vec3 mwE = transpose(uEqToWorld) * d;
+        vec3 mwE = transpose(uEqToWorld) * dT;
         vec3 g = uGal * mwE; float gl = atan(g.y, g.x), gb = asin(clamp(g.z,-1.0,1.0));
         // longitude wraps from 1 to 0 at l = 180 deg: take the mip-level gradients across the wrap, or that pixel
         // column picks the blurriest level and draws a thin seam through the sky
@@ -257,7 +263,7 @@ export function makeSkyBackground(U, mwTex) {
         // green lower border ~100 km, red tops above 200 km, pink N2 fringe in strong storms), on rays along the arc,
         // and on how obliquely the ray crosses the sheet. Folds drift and rays shimmer faster with higher Kp.
         if (uAurora.z > 0.0 && sh > -0.02) {
-          vec3 dE = uENU * vec3(d.x, -d.z, d.y);            // world (east, up, south) -> Earth-fixed
+          vec3 dE = uENU * vec3(dT.x, -dT.z, dT.y);         // world (east, up, south) -> Earth-fixed (true direction)
           vec3 O = uObsECEF, A = uMagAxis;
           float hemi = dot(O, A) >= 0.0 ? 1.0 : -1.0;
           float kp = uAurora.w, act = clamp((kp - 2.0)/5.0, 0.15, 1.4), tt = uAurT;   // simulated time: live speed, and the night's changes when skipping ahead
@@ -423,10 +429,8 @@ export function starMaterial(U, eq) {
       #include <logdepthbuf_pars_vertex>
       void main(){
         vec3 d = ${eq ? 'uEqToWorld * position' : 'position'};
-        // refraction lift near the horizon
-        float h = asin(clamp(d.y,-1.0,1.0))*57.2958;
-        float hh = max(h, -1.0); float rf = 1.02/tan(radians(hh + 10.3/(hh + 5.11)))/60.0; h += clamp(rf, 0.0, 0.6);
-        float hr = radians(h); vec2 hz = normalize(d.xz); d = vec3(hz.x*cos(hr), sin(hr), hz.y*cos(hr));
+        // refraction lift near the horizon (points of light: raised, not reshaped)
+        d = refrApparent(d);
         float m = mag;
         vec3 T = directT(d.y);
         // local sky brightness -> naked-eye limiting magnitude (Schaefer); stars fade as the sky brightens
@@ -486,7 +490,7 @@ export function makeMoon(U) {
     uniforms: U, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */`
       #include <common>
-      uniform vec3 uMoonDir; uniform float uMoonRadius, uPxSr, uMoonCam; uniform mat3 uEqToWorld; out vec2 vP; out float vQ;
+      uniform vec3 uMoonDir; uniform float uMoonRadius, uPxSr, uMoonCam, uMoonSquish; uniform mat3 uEqToWorld; out vec2 vP; out float vQ;
       #include <logdepthbuf_pars_vertex>
       void main(){
         vP = position.xy;
@@ -497,7 +501,11 @@ export function makeMoon(U) {
         // r = screen right, u = up: the quad faces the camera (it was wound away from it and culled, and mirrored)
         vec3 r = normalize(cross(f, up0)), u = cross(r, f);
         float s = tan(Rq) * 1.0e6 * 1.02;
-        vec3 w = cameraPosition + f*1.0e6 + (r*position.x + u*position.y)*s;
+        vec3 o = (r*position.x + u*position.y)*s;
+        // refraction squashes the disc vertically near the horizon
+        vec3 vt = vec3(0.0, 1.0, 0.0) - f*f.y; vt = dot(vt, vt) > 1e-8 ? normalize(vt) : r;
+        o -= vt*dot(o, vt)*(1.0 - uMoonSquish);
+        vec3 w = cameraPosition + f*1.0e6 + o;
         gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
         #include <logdepthbuf_vertex>
       }`,

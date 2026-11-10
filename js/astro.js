@@ -11,6 +11,13 @@ export function bodyHor(body, date, obs, refr = true) {
 }
 
 // Unit vector in the app's world frame (x east, y up, z south) from alt/az in degrees.
+// Atmospheric refraction lift (degrees) at true altitude h (Saemundsson), scaled by k (pressure/temperature, 1 = standard)
+export function refraction(h, k = 1) {
+  const hh = Math.max(h, -1.5), r = 1.02 / Math.tan((hh + 10.3 / (hh + 5.11)) * Math.PI / 180) / 60;
+  return Math.min(Math.max(r, 0), 0.75) * k;
+}
+// k from the air at the viewer: pressure (hPa) and temperature (C)
+export function refractionK(pHpa, tC) { return (pHpa / 1010) * (283 / (273 + tC)); }
 export function altAzToVec(alt, az) {
   const a = alt * Math.PI / 180, z = az * Math.PI / 180;
   return [Math.cos(a) * Math.sin(z), Math.sin(a), -Math.cos(a) * Math.cos(z)];

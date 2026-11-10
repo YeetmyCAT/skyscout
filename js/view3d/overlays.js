@@ -1,13 +1,19 @@
 // Astronomy overlays: alt/az grid, horizon, cardinal points, meridian, celestial equator, ecliptic, constellation lines,
 // and HTML labels for planets, bright stars, Moon, Sun, light domes and storm targets.
 import * as THREE from '../../vendor/three.module.min.js';
-import { altAzToVec, raDecVec, OBLIQ } from '../astro.js';
+import { altAzToVec, raDecVec, OBLIQ, refraction } from '../astro.js';
+import { REFR, refrUniform } from './glsl.js';
+// a sky direction as it is seen: raised by refraction near the horizon (labels follow the refracted stars)
+function seen(v) { const l = Math.hypot(v[0], v[1], v[2]), y = v[1] / l, h = Math.asin(Math.max(-1, Math.min(1, y))) * 180 / Math.PI; if (h > 89) return v; const a = (h + refraction(h, refrUniform.value)) * Math.PI / 180, hl = Math.hypot(v[0], v[2]) || 1; return [v[0] / hl * Math.cos(a) * l, Math.sin(a) * l, v[2] / hl * Math.cos(a) * l]; }
 
 const RAD = 1e6;
-function lineMat(color, opacity) {
+// refr: sky lines (equator, ecliptic, constellations) are raised by refraction like the stars they connect
+function lineMat(color, opacity, refr) {
   return new THREE.ShaderMaterial({
-    uniforms: { uC: { value: new THREE.Color(color) }, uO: { value: opacity } }, transparent: true, depthWrite: false,
-    vertexShader: '#include <common>\n#include <logdepthbuf_pars_vertex>\nvoid main(){ gl_Position = projectionMatrix*viewMatrix*modelMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
+    uniforms: { uC: { value: new THREE.Color(color) }, uO: { value: opacity }, uRefrK: refrUniform }, transparent: true, depthWrite: false,
+    vertexShader: refr
+      ? '#include <common>\n' + REFR + '\n#include <logdepthbuf_pars_vertex>\nvoid main(){ vec3 dd = (modelMatrix*vec4(position,1.0)).xyz - cameraPosition; float len = length(dd); dd = refrApparent(dd/len)*len; gl_Position = projectionMatrix*viewMatrix*vec4(cameraPosition + dd, 1.0);\n#include <logdepthbuf_vertex>\n}'
+      : '#include <common>\n#include <logdepthbuf_pars_vertex>\nvoid main(){ gl_Position = projectionMatrix*viewMatrix*modelMatrix*vec4(position,1.0);\n#include <logdepthbuf_vertex>\n}',
     fragmentShader: 'uniform vec3 uC; uniform float uO;\n#include <logdepthbuf_pars_fragment>\nvoid main(){\n#include <logdepthbuf_fragment>\n gl_FragColor = vec4(uC, uO); }',
   });
 }
@@ -32,9 +38,9 @@ export class Overlays {
     const eq = [], ec = [];
     for (let ra = 0; ra < 360; ra += 1) { eq.push(...raDecVec(ra, 0).map(x => x * RAD), ...raDecVec(ra + 1, 0).map(x => x * RAD)); }
     for (let l = 0; l < 360; l += 1) { ec.push(...ecl(l), ...ecl(l + 1)); }
-    this.equator = segs(eq, lineMat(0x8fe3a8, 0.35)); this.ecliptic = segs(ec, lineMat(0xffb070, 0.5));
+    this.equator = segs(eq, lineMat(0x8fe3a8, 0.35, true)); this.ecliptic = segs(ec, lineMat(0xffb070, 0.5, true));
     const cl = []; for (const line of constLines) for (let i = 0; i < line.length - 1; i++) cl.push(...raDecVec(...line[i]).map(x => x * RAD), ...raDecVec(...line[i + 1]).map(x => x * RAD));
-    this.constellations = segs(cl, lineMat(0x88aaff, 0.22));
+    this.constellations = segs(cl, lineMat(0x88aaff, 0.22, true));
     this.eqGroup.add(this.equator, this.ecliptic, this.constellations);
     // star names
     this.stars = Object.entries(starData.n).map(([i, name]) => ({ name, v: raDecVec(starData.s[i * 4], starData.s[i * 4 + 1]), mag: starData.s[i * 4 + 2] }));
@@ -58,9 +64,9 @@ export class Overlays {
     if (this.on.meridian) L.push({ t: 'meridian', alt: 45, az: 180, cls: 'gridlbl mer' });
     if (this.on.labels && this.eqMat && !(this.sunAlt > -7)) {
       const m = this.eqMat;
-      for (const s of this.stars) { const v = s.v; const x = m[0] * v[0] + m[1] * v[1] + m[2] * v[2], y = m[3] * v[0] + m[4] * v[1] + m[5] * v[2], z = m[6] * v[0] + m[7] * v[1] + m[8] * v[2]; if (y > 0.02) L.push({ t: s.name, vec: [x, y, z], cls: 'star' }); }
+      for (const s of this.stars) { const v = s.v; const x = m[0] * v[0] + m[1] * v[1] + m[2] * v[2], y = m[3] * v[0] + m[4] * v[1] + m[5] * v[2], z = m[6] * v[0] + m[7] * v[1] + m[8] * v[2]; if (y > 0.02) L.push({ t: s.name, vec: seen([x, y, z]), cls: 'star' }); }
     }
-    if (this.on.ecliptic && this.eqMat) L.push(...[0, 90, 180, 270].map(l => { const e = ecl(l).map(x => x / RAD), m = this.eqMat; return { t: 'ecliptic', vec: [m[0] * e[0] + m[1] * e[1] + m[2] * e[2], m[3] * e[0] + m[4] * e[1] + m[5] * e[2], m[6] * e[0] + m[7] * e[1] + m[8] * e[2]], cls: 'gridlbl ecl' }; }).filter(x => x.vec[1] > 0));
+    if (this.on.ecliptic && this.eqMat) L.push(...[0, 90, 180, 270].map(l => { const e = ecl(l).map(x => x / RAD), m = this.eqMat; return { t: 'ecliptic', vec: seen([m[0] * e[0] + m[1] * e[1] + m[2] * e[2], m[3] * e[0] + m[4] * e[1] + m[5] * e[2], m[6] * e[0] + m[7] * e[1] + m[8] * e[2]]), cls: 'gridlbl ecl' }; }).filter(x => x.vec[1] > 0));
     for (const d of this.dynamic || []) if (this.on.labels || d.always) if (!(d.dome && !this.on.domes)) L.push(d);
     // project, most important first; drop labels that would overlap one already placed
     const pri = c => /cardi/.test(c) ? 0 : /planet|storm/.test(c) ? 1 : /dome|mw/.test(c) ? 2 : /star/.test(c) ? 4 : 3;

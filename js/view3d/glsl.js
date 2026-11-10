@@ -1,5 +1,19 @@
 // Shared GLSL: sky-view LUT lookup, log-depth decode, noise, transmittance.
-export const COMMON = /* glsl */`
+// Atmospheric refraction: objects near the horizon look higher than they are (~0.57 deg at the horizon at sea level,
+// ~0.1 deg at 10 deg up), and since the lift shrinks with height the Sun and Moon look squashed. uRefrK scales it by
+// the air's pressure and temperature at the viewer (1 = 1010 hPa and 10 C): weaker on a mountain or a hot day.
+export const refrUniform = { value: 1 };
+export const REFR = /* glsl */`
+uniform float uRefrK;
+// lift (degrees) of an object at true altitude h (Saemundsson), and the lift to remove from an apparent altitude (Bennett)
+float refrLift(float h){ float hh = max(h, -1.5); return clamp(1.02/tan(radians(hh + 10.3/(hh + 5.11)))/60.0, 0.0, 0.75)*uRefrK; }
+float refrLiftApp(float h){ float hh = max(h, -1.0); return clamp(1.0/tan(radians(hh + 7.31/(hh + 4.4)))/60.0, 0.0, 0.75)*uRefrK; }
+vec3 refrSetAlt(vec3 d, float hDeg){ vec2 hz = d.xz; float l = length(hz); hz = l > 1e-6 ? hz/l : vec2(0.0, -1.0); float hr = radians(hDeg); return vec3(hz.x*cos(hr), sin(hr), hz.y*cos(hr)); }
+// true direction -> where it is seen; seen direction -> true direction (both unit vectors, world frame, y up)
+vec3 refrApparent(vec3 d){ float h = degrees(asin(clamp(d.y, -1.0, 1.0))); return h > 89.0 ? d : refrSetAlt(d, h + refrLift(h)); }
+vec3 refrTrue(vec3 d){ float h = degrees(asin(clamp(d.y, -1.0, 1.0))); return h > 89.0 ? d : refrSetAlt(d, h - refrLiftApp(h)); }
+`;
+export const COMMON = REFR + /* glsl */`
 #ifndef PI
 #define PI 3.141592653589793
 #endif
