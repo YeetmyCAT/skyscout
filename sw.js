@@ -1,5 +1,5 @@
 // Offline support: app files cache-first, map tiles stale-while-revalidate. Forecast data is kept in IndexedDB by the app.
-const APP = 'skyscout-app-v27', TILES = 'skyscout-tiles-v1';
+const APP = 'skyscout-app-v28', TILES = 'skyscout-tiles-v1';
 const FILES = ['./', 'index.html', 'css/app.css', 'manifest.webmanifest', 'vendor/three.module.min.js', 'vendor/astronomy.browser.min.js', 'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
   'js/main.js', 'js/util.js', 'js/weather.js', 'js/satellite.js', 'js/terrain.js', 'js/lightpol.js', 'js/lpworker.js', 'js/astro.js', 'js/osm.js', 'js/routing.js', 'js/scout.js', 'js/sprites.js', 'js/map.js', 'js/atlas.js', 'js/horizon.js', 'js/pmtiles.js', 'js/space.js', 'js/backup.js', 'js/spritestorms.js', 'js/view3d/canopy.js', 'js/view3d/skyevents.js', 'data/milkyway.jpg', 'data/moon.jpg', 'data/stars8.bin', 'vendor/satellite.min.js', 'vendor/tz-lookup.js',
   'js/view3d/view.js', 'js/view3d/glsl.js', 'js/view3d/sky.js', 'js/view3d/clouds.js', 'js/view3d/noiseworker.js', 'js/view3d/ground.js', 'js/view3d/structures.js', 'js/view3d/weatherfx.js', 'js/view3d/overlays.js', 'js/view3d/farms.js',
