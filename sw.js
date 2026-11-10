@@ -1,7 +1,7 @@
 // Offline support: app files cache-first, map tiles stale-while-revalidate. Forecast data is kept in IndexedDB by the app.
-const APP = 'skyscout-app-v21', TILES = 'skyscout-tiles-v1';
+const APP = 'skyscout-app-v22', TILES = 'skyscout-tiles-v1';
 const FILES = ['./', 'index.html', 'css/app.css', 'manifest.webmanifest', 'vendor/three.module.min.js', 'vendor/astronomy.browser.min.js', 'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
-  'js/main.js', 'js/util.js', 'js/weather.js', 'js/satellite.js', 'js/terrain.js', 'js/lightpol.js', 'js/lpworker.js', 'js/astro.js', 'js/osm.js', 'js/routing.js', 'js/scout.js', 'js/sprites.js', 'js/map.js', 'js/atlas.js', 'js/horizon.js', 'js/pmtiles.js', 'js/space.js', 'js/backup.js', 'js/spritestorms.js', 'js/view3d/canopy.js', 'js/view3d/skyevents.js', 'data/milkyway.jpg', 'data/stars8.bin', 'vendor/satellite.min.js', 'vendor/tz-lookup.js',
+  'js/main.js', 'js/util.js', 'js/weather.js', 'js/satellite.js', 'js/terrain.js', 'js/lightpol.js', 'js/lpworker.js', 'js/astro.js', 'js/osm.js', 'js/routing.js', 'js/scout.js', 'js/sprites.js', 'js/map.js', 'js/atlas.js', 'js/horizon.js', 'js/pmtiles.js', 'js/space.js', 'js/backup.js', 'js/spritestorms.js', 'js/view3d/canopy.js', 'js/view3d/skyevents.js', 'data/milkyway.jpg', 'data/moon.jpg', 'data/stars8.bin', 'vendor/satellite.min.js', 'vendor/tz-lookup.js',
   'js/view3d/view.js', 'js/view3d/glsl.js', 'js/view3d/sky.js', 'js/view3d/clouds.js', 'js/view3d/noiseworker.js', 'js/view3d/ground.js', 'js/view3d/structures.js', 'js/view3d/weatherfx.js', 'js/view3d/overlays.js', 'js/view3d/farms.js',
   'data/stars.json', 'data/constlines.json', 'data/milkyway.json', 'data/ircolormap.json', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-180.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(APP).then(c => Promise.all(FILES.map(f => c.add(f).catch(() => null))))); self.skipWaiting(); });

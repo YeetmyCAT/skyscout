@@ -185,7 +185,7 @@ export function makeSkyBackground(U, mwTex) {
     vertexShader: `out vec3 vDir; uniform mat4 uInvProjView; uniform vec3 uCamPos;
       void main(){ vec4 w = uInvProjView * vec4(position.xy, 1.0, 1.0); vDir = w.xyz/w.w - uCamPos; gl_Position = vec4(position.xy, 1.0, 1.0); }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform sampler2D uAurP; uniform vec3 uObsECEF, uMagAxis;
+      in vec3 vDir; uniform sampler2D uMW; uniform mat3 uEqToWorld, uGal, uENU; uniform float uMWScale; uniform vec4 uAurora; uniform sampler2D uAurP; uniform vec3 uObsECEF, uMagAxis; uniform float uAurT;
       // Distance along the ray to a surface of constant magnetic latitude phi (a cone about the dipole axis A) at
       // auroral heights; which = 0 nearer crossing, 1 farther. -1 if none.
       // aurora brightness (kR) where a ray meets the emitting layer, from NOAA-style chance of aurora at that spot:
@@ -210,6 +210,9 @@ export function makeSkyBackground(U, mwTex) {
         float h = length(O + D*t) - 6371.0;
         return (h < hmin || h > hmax) ? -1.0 : t;
       }
+      // magnetic shell value (km): constant along a dipole field line, so a curtain that follows the field is a
+      // surface of constant L, leaning equatorward with height like real curtains (not a vertical wall)
+      float auroraL(vec3 P, vec3 A){ float r = length(P), s = dot(P, A)/r; return r/max(1.0 - s*s, 1e-4); }
       // how close an Earth-fixed point is to the arcs actually showing (their magnetic latitudes and lit segments):
       // the diffuse green glow surrounds the aurora instead of filling the whole region where aurora is possible
       float auroraHalo(vec3 Pn, vec3 A, vec3 refA, vec3 refB, float tt, float act){
@@ -255,25 +258,50 @@ export function makeSkyBackground(U, mwTex) {
           vec3 dE = uENU * vec3(d.x, -d.z, d.y);            // world (east, up, south) -> Earth-fixed
           vec3 O = uObsECEF, A = uMagAxis;
           float hemi = dot(O, A) >= 0.0 ? 1.0 : -1.0;
-          float kp = uAurora.w, act = clamp((kp - 2.0)/5.0, 0.15, 1.4), tt = uTime;
+          float kp = uAurora.w, act = clamp((kp - 2.0)/5.0, 0.15, 1.4), tt = uAurT;   // simulated time: live speed, and the night's changes when skipping ahead
           vec3 refA = normalize(cross(A, vec3(0.0, 0.0, 1.0)) + 1e-4), refB = cross(A, refA);
           float grAcc = 0.0, redAcc = 0.0, pinkAcc = 0.0;
+          // where the ray is inside the emitting heights (85-420 km), and a start point at 130 km
+          float bR = dot(O, dE), cR = dot(O, O);
+          float tLo = -bR + sqrt(max(bR*bR - (cR - 6456.0*6456.0), 0.0));
+          float tHi = -bR + sqrt(max(bR*bR - (cR - 6791.0*6791.0), 0.0));
+          float tMid = -bR + sqrt(max(bR*bR - (cR - 6501.0*6501.0), 0.0));
           for (int i = 0; i < 5; i++) {
             float fi = float(i), lat0 = uAurora.x + (fi - 2.0)*uAurora.y;   // arcs spread across the oval
+            float tFirst = -1e9;
             for (int w = 0; w < 2; w++) {                                 // near and far crossing of the sheet
               // the unfolded arc only finds where along the ray to look: its height window is wider than the
               // emitting layer's, or the folded curtain's lower part gets cut off in a hard line
               float t = auroraSheet(O, dE, A, lat0, hemi, w, 40.0, 600.0);
-              if (t < 0.0) continue;
+              if (t < 0.0) { if (w == 1) continue; t = tMid; }            // e.g. looking up from under a leaning curtain
               vec3 Pn = normalize(O + dE*t);
               float mlon = atan(dot(Pn, refB), dot(Pn, refA));
               // folds: large slow meanders plus small fast curls
               float fold = 0.009*(fbm2(vec2(mlon*7.0 + fi*3.1, tt*0.004*(1.0 + 3.0*act))) - 0.5)
                          + 0.0025*(vnoise(vec2(mlon*45.0 - tt*0.02*(1.0 + 4.0*act), fi*5.0)) - 0.5);
-              float t2 = auroraSheet(O, dE, A, lat0 + fold, hemi, w, 85.0, 420.0);
-              if (t2 <= 0.0) continue;                                      // no curtain here (no jump back to the unfolded arc)
-              t = t2; Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA));
+              // the curtain's field-line surface (anchored at 110 km); find where the ray comes closest to it inside
+              // the emitting heights (Newton steps), then let its few-km thickness decide how much light we get:
+              // no hard edges, and seen from below it is a soft band, not a line
+              float c0 = cos(lat0 + fold), Ls = 6481.0/max(c0*c0, 1e-4);
+              float dL = 1.0;
+              for (int k = 0; k < 4; k++) {
+                float f0 = auroraL(O + dE*t, A) - Ls;
+                dL = 0.5*(auroraL(O + dE*(t + 1.0), A) - auroraL(O + dE*(t - 1.0), A));
+                t = clamp(t - f0/(abs(dL) > 1e-3 ? dL : (dL >= 0.0 ? 1e-3 : -1e-3)), tLo, tHi);
+              }
+              // the far crossing can settle on the same spot as the near one: count that curtain once
+              if (w == 1 && abs(t - tFirst) < 3.0) continue;
+              if (w == 0) tFirst = t;
+              float Lt = auroraL(O + dE*t, A);
+              dL = 0.5*(auroraL(O + dE*(t + 1.0), A) - auroraL(O + dE*(t - 1.0), A));
+              const float thick = 7.0;                                       // km (1-sigma), fuzzy
+              float wL = Ls*2.0*tan(lat0)*thick/6481.0;                      // that thickness in L units
+              float G = exp(-pow((Lt - Ls)/wL, 2.0));
+              if (G < 0.002) continue;
+              Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA));
               float h = length(O + dE*t) - 6371.0;
+              // km of the curtain along the ray: ~thickness face-on, longer obliquely, capped edge-on
+              float path = 1.0/sqrt(pow(dL/(1.7725*wL), 2.0) + 1.0/3600.0);
               float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlon*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));   // arcs come in segments
               float amp = (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg;
               if (amp < 0.01) continue;
@@ -286,10 +314,8 @@ export function makeSkyBackground(U, mwTex) {
               float gP = smoothstep(hb - 12.0, hb + 4.0, h) * exp(-max(h - hb, 0.0)/(40.0 + 15.0*rays));   // fuzzy lower edge
               float rP = exp(-pow((h - 230.0)/65.0, 2.0));
               float pP = exp(-pow((h - hb + 2.0)/4.0, 2.0));
-              vec3 nrm = normalize(A - dot(A, Pn)*Pn);                   // across the sheet
-              float geo = clamp(0.5/max(abs(dot(nrm, dE)), 0.12), 0.5, 2.0); // seen edge-on a sheet collects more light (softened)
               float pulse = 1.0 + 0.35*act*sin(tt*(1.3 + fi) + mlon*30.0);
-              float I = 0.6*amp*rays*geo*pulse*kR;
+              float I = 0.6*amp*rays*pulse*kR*G*path/(2.0*1.7725*thick);   // face-on matches the old sheet brightness
               grAcc += I*gP; redAcc += I*rP; pinkAcc += I*pP;
             }
           }
@@ -449,20 +475,22 @@ export function bvToRGB(bv) {
 
 // Moon: lit sphere with procedural maria, correct phase from the true Sun direction, earthshine, extinction.
 export function makeMoon(U) {
-  Object.assign(U, { uMoonLight: { value: new THREE.Vector3() }, uMoonRadius: { value: 0.0045 }, uMoonLum: { value: 2500 }, uMoonGain: { value: 1 }, uMoonAvg: { value: 0 }, uMoonCam: { value: 0 } });
+  Object.assign(U, { uMoonLight: { value: new THREE.Vector3() }, uMoonRadius: { value: 0.0045 }, uMoonLum: { value: 2500 }, uMoonGain: { value: 1 }, uMoonAvg: { value: 0 }, uMoonCam: { value: 0 }, uMoonMapOK: { value: 0 } });
+  // real albedo map: NASA LRO (SVS CGI Moon Kit, public domain), reduced to 512x256 greyscale (30 KB)
+  U.uMoonMap = { value: new THREE.TextureLoader().load('data/moon.jpg', t => { t.wrapS = THREE.RepeatWrapping; t.needsUpdate = true; U.uMoonMapOK.value = 1; }) };
   const geo = new THREE.PlaneGeometry(2, 2);
   const mat = new THREE.ShaderMaterial({
     uniforms: U, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */`
       #include <common>
-      uniform vec3 uMoonDir; uniform float uMoonRadius, uPxSr, uMoonCam; out vec2 vP; out float vQ;
+      uniform vec3 uMoonDir; uniform float uMoonRadius, uPxSr, uMoonCam; uniform mat3 uEqToWorld; out vec2 vP; out float vQ;
       #include <logdepthbuf_pars_vertex>
       void main(){
         vP = position.xy;
         // at least ~1.5 px across so the Moon can't fall between pixels; a camera also gets room for the glare
         // around an overexposed Moon (vQ = quad size / true size)
         float Rq = max(uMoonRadius, 1.5*sqrt(uPxSr)) * mix(1.0, 7.0, uMoonCam); vQ = Rq/uMoonRadius;
-        vec3 f = normalize(uMoonDir), up0 = abs(f.y) > 0.99 ? vec3(1,0,0) : vec3(0,1,0);
+        vec3 f = normalize(uMoonDir), pole = normalize(uEqToWorld * vec3(0.0, -0.3978, 0.9175)), up0 = abs(dot(pole, f)) > 0.999 ? vec3(1,0,0) : pole;   // lunar north ~ ecliptic pole
         // r = screen right, u = up: the quad faces the camera (it was wound away from it and culled, and mirrored)
         vec3 r = normalize(cross(f, up0)), u = cross(r, f);
         float s = tan(Rq) * 1.0e6 * 1.02;
@@ -471,12 +499,12 @@ export function makeMoon(U) {
         #include <logdepthbuf_vertex>
       }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec2 vP; in float vQ; uniform vec3 uMoonLight; uniform float uMoonLum, uMoonGain, uMoonAvg, uPxSr, uMoonRadius, uMoonCam;
+      in vec2 vP; in float vQ; uniform vec3 uMoonLight; uniform float uMoonLum, uMoonGain, uMoonAvg, uPxSr, uMoonRadius, uMoonCam, uMoonMapOK; uniform mat3 uEqToWorld; uniform sampler2D uMoonMap;
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
         if (dot(vP, vP) > 1.0) discard;
-        vec3 f = normalize(uMoonDir), up0 = abs(f.y) > 0.99 ? vec3(1,0,0) : vec3(0,1,0);
+        vec3 f = normalize(uMoonDir), pole = normalize(uEqToWorld * vec3(0.0, -0.3978, 0.9175)), up0 = abs(dot(pole, f)) > 0.999 ? vec3(1,0,0) : pole;   // lunar north ~ ecliptic pole
         vec3 T = directT(uMoonDir.y);
         vec2 q = vP*vQ; float r2 = dot(q, q);
         vec3 det = vec3(0.0);
@@ -484,22 +512,17 @@ export function makeMoon(U) {
         vec3 rr = normalize(cross(f, up0)), uu = cross(rr, f);
         vec3 n = normalize(rr*q.x + uu*q.y - f*sqrt(1.0 - r2)); // surface normal facing us
         float ci = dot(n, uMoonLight), ce = sqrt(1.0 - r2);
-        // selenographic-ish coordinates for maria (near side faces Earth; north roughly toward celestial north)
-        vec2 sl = q;
-        float maria = 0.0;
-        maria += smoothstep(0.32, 0.0, length((sl - vec2(-0.35, 0.42))*vec2(1.0,1.3)));  // Imbrium
-        maria += smoothstep(0.22, 0.0, length(sl - vec2(0.15, 0.40)));                     // Serenitatis
-        maria += smoothstep(0.25, 0.0, length(sl - vec2(0.38, 0.12)));                     // Tranquillitatis
-        maria += smoothstep(0.17, 0.0, length(sl - vec2(0.72, 0.30)));                     // Crisium
-        maria += smoothstep(0.45, 0.0, length((sl - vec2(-0.62, 0.05))*vec2(1.4,0.9)));    // Procellarum
-        maria += smoothstep(0.17, 0.0, length(sl - vec2(-0.28, -0.35)));                    // Nubium
-        maria += smoothstep(0.16, 0.0, length(sl - vec2(0.45, -0.18)));                     // Fecunditatis
-        maria += smoothstep(0.14, 0.0, length(sl - vec2(-0.05, 0.05)));                     // Vaporum/Medii
-        float alb = mix(0.16, 0.075, clamp(maria, 0.0, 1.0)) * (0.85 + 0.3*fbm2(sl*12.0));
-        alb += 0.08*smoothstep(0.06, 0.0, length(sl - vec2(-0.15, -0.72)));                 // Tycho
+        // albedo from the real lunar map: near side toward us (selenographic latitude/longitude on the disc);
+        // grey^1.3 makes highlands ~2.5x the maria, scaled so the near-side mean albedo stays 0.12
+        float slat = asin(clamp(q.y, -1.0, 1.0)), slon = atan(q.x, sqrt(1.0 - r2));
+        float gm = texture(uMoonMap, vec2(0.5 + slon/(2.0*PI), 0.5 + slat/PI)).r;
+        float alb = uMoonMapOK > 0.5 ? 0.12*pow(gm, 1.3)/0.4224 : 0.12;
         float ls = ci > 0.0 ? ci/(ci + ce) : 0.0;          // Lommel-Seeliger
         float L = uMoonLum * uMoonGain * alb/0.12 * ls * 2.0;   // sunlit part follows the phase curve; earthshine doesn't
-        float earthshine = uMoonLum * 1.2e-4 * alb/0.12 * (0.5 - 0.5*dot(uMoonLight, -f));
+        // earthshine follows the Earth's phase seen from the Moon (Lambert sphere): strong for a crescent Moon, faint
+        // by the quarter, effectively gone at gibbous
+        float bE = PI - acos(clamp(dot(uMoonLight, -f), -1.0, 1.0));
+        float earthshine = uMoonLum * 1.32e-4 * alb/0.12 * (sin(bE) + (PI - bE)*cos(bE))/PI;
         det = vec3(1.0, 0.95, 0.88) * (L + earthshine) * T * uExposure * smoothstep(1.0, 0.96, r2);
         }
         // only a few pixels across: shade the disc evenly with its mean brightness for this phase (spread over at
@@ -522,6 +545,30 @@ export function makeMoon(U) {
       }`,
   });
   const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = -80;
+  return m;
+}
+
+// Glare around the Moon, over everything in view (it happens in the eye or the lens, not the sky). Eye: the
+// Stiles-Holladay disability-glare law, L = 10 E / theta^2 (cd/m^2, E in lux at the eye, theta in degrees), so even a
+// crescent lifts the whole sky a little and a full Moon a lot. Camera: lens and sensor flare, stronger and wider.
+export function makeMoonGlare(U) {
+  Object.assign(U, { uMoonVis: { value: 1 }, uMoonGlare: { value: 1 } });
+  const mat = new THREE.ShaderMaterial({
+    uniforms: U, transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `out vec3 vDir; uniform mat4 uInvProjView; uniform vec3 uCamPos;
+      void main(){ vec4 w = uInvProjView * vec4(position.xy, 1.0, 1.0); vDir = w.xyz/w.w - uCamPos; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: COMMON + /* glsl */`
+      in vec3 vDir; uniform float uMoonCam, uMoonVis, uMoonGlare, uMoonRadius;
+      void main(){
+        vec3 d = normalize(vDir), m = normalize(uMoonDir);
+        float th = max(acos(clamp(dot(d, m), -1.0, 1.0)), uMoonRadius*1.3) * 57.29578;   // degrees from the Moon
+        float E = dot(uMoonE * directT(max(m.y, 0.0)), vec3(0.2126, 0.7152, 0.0722)) * smoothstep(-0.01, 0.01, m.y) * uMoonVis;
+        float L = mix(10.0*E/(th*th), 60.0*E/pow(th, 1.6), uMoonCam) * uMoonGlare;
+        gl_FragColor = vec4(vec3(1.0, 0.96, 0.9) * min(L*uExposure, 3.0e4), 1.0);
+      }`,
+  });
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+  const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = 900;
   return m;
 }
 

@@ -1,6 +1,6 @@
 // Immersive 360° view: assembles sky, clouds, terrain, structures and weather for one place and time.
 import * as THREE from '../../vendor/three.module.min.js';
-import { makeSkyLUT, makeSkyBackground, makeStars, makePlanets, makeMoon, milkyWayPhoto, makeFaintStars, lpSkyTexture } from './sky.js';
+import { makeSkyLUT, makeSkyBackground, makeStars, makePlanets, makeMoon, makeMoonGlare, milkyWayPhoto, makeFaintStars, lpSkyTexture } from './sky.js';
 import { SkyEvents } from './skyevents.js';
 import { loadKp, kpAt, MAG_POLE, ecef, enuBasis, magLat, loadSatellites, loadOvation, synthAurora, auroraOval } from '../space.js';
 import { loadNoise, makeCloudPass, weatherTextures, R_EFF } from './clouds.js';
@@ -58,7 +58,7 @@ export class Immersive {
     this.yaw = 180; this.pitch = 15; this.fov = 70; this.eye = 1.7; this.walk = new THREE.Vector3();
     const U = this.U = {
       uSkyLUT: { value: null }, uSkyLUTLow: { value: null }, uExposure: { value: 1 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
-      uSunE: { value: new THREE.Vector3() }, uMoonE: { value: new THREE.Vector3() }, uAOD: { value: 0.12 }, uTime: { value: 0 }, uNight: { value: 0 },
+      uSunE: { value: new THREE.Vector3() }, uMoonE: { value: new THREE.Vector3() }, uAOD: { value: 0.12 }, uTime: { value: 0 }, uAurT: { value: 0 }, uNight: { value: 0 },
       uSnow: { value: 0 }, uWet: { value: 0 }, uOvercast: { value: 0 }, uVisKm: { value: 40 }, uFlash: { value: new THREE.Vector4() }, uLogFar: { value: Math.log2(2.2e6 + 1) },
       uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() },
       uLitFrac: { value: 0.5 }, uLeafFrac: { value: 1 }, uAutumn: { value: 0 }, uSpring: { value: 0 }, uGreen: { value: 1 }, uLeafOff: { value: 0 }, uCrop: { value: new THREE.Vector4() },
@@ -71,6 +71,7 @@ export class Immersive {
     this.stars = makeStars(U, assets.stars); this.main.add(this.stars);
     this.planets = makePlanets(U); this.main.add(this.planets);
     this.moon = makeMoon(U); this.main.add(this.moon);
+    this.moonGlare = makeMoonGlare(U); this.fg.add(this.moonGlare);
     this.overlays = new Overlays(container, assets.constLines, assets.stars); this.fg.add(this.overlays.group);
     this.audio = new WxAudio();
     this.precip = new Precip(U, this.mobile); this.fg.add(this.precip.group);
@@ -257,7 +258,8 @@ export class Immersive {
     const moonPA = Math.acos(Math.max(-1, Math.min(1, -ml.dot(new THREE.Vector3(...mv))))) / DEG, md = moonPhaseGain(moonPA);
     U.uMoonGain.value = md.gain;
     // mean radiance over the disc (sunlit part + earthshine), used when the Moon is only a few pixels wide
-    U.uMoonAvg.value = 2900 * (md.gain * 2 * md.lsMean + 1.2e-4 * (0.5 - 0.5 * Math.cos(moonPA * DEG)));
+    const bE = Math.PI - moonPA * DEG;   // Earth's phase angle seen from the Moon (earthshine, Lambert sphere)
+    U.uMoonAvg.value = 2900 * (md.gain * 2 * md.lsMean + 1.32e-4 * (Math.sin(bE) + (Math.PI - bE) * Math.cos(bE)) / Math.PI);
     // sky rotation
     const m = eqjToWorld(date, observer(lat, lon, groundZ));
     U.uEqToWorld.value.set(...m); this.overlays.setEq(m);
@@ -311,6 +313,23 @@ export class Immersive {
     if (!pn || pn.type === 'none' || !(pn.rate > 0)) { if (this.precip.clearUp) this.precip.setClearUp(false); return; }
     if (now - (this.zpLast || 0) < 0.3) return;
     this.zpLast = now;
+    const T = this.cloudT(cam, 0, 1, 0);
+    this.zenithT = T;
+    // a little hysteresis so a ragged cloud edge doesn't flicker the rain on and off
+    const clear = this.precip.clearUp ? T > 0.8 : T > 0.85;
+    if (clear !== !!this.precip.clearUp) this.precip.setClearUp(clear);
+  }
+  // Moon glare only reaches us when the Moon itself does: how much of it shows through the clouds
+  moonProbe(now, cam) {
+    const U = this.U, md = U.uMoonDir.value;
+    if (md.y < -0.02 || !this.sm || this.sm.sun.alt > 0) { U.uMoonVis.value = 1; return; }
+    if (now - (this.mpLast || 0) < 0.3) return;
+    this.mpLast = now;
+    const T = this.cloudT(cam, md.x, md.y, md.z, 3);
+    U.uMoonVis.value = this.mpInit ? U.uMoonVis.value * 0.4 + T * 0.6 : T; this.mpInit = true;
+  }
+  // mean cloud transmittance in a narrow cone along a direction: a tiny copy of the cloud pass, read back
+  cloudT(cam, dx, dy, dz, fov = 20) {
     const r = this.renderer, U = this.U;
     if (!this.zp) {
       const rt = new THREE.WebGLRenderTarget(4, 4, { depthBuffer: false });   // 8-bit RGBA: alpha holds the sky transmittance
@@ -319,17 +338,16 @@ export class Immersive {
       this.zp = { rt, dep, cam: c, buf: new Uint8Array(64), m: new THREE.Matrix4() };
     }
     const z = this.zp, p = cam.position;
-    z.cam.position.copy(p); z.cam.lookAt(p.x, p.y + 1, p.z); z.cam.updateMatrixWorld();
+    if (z.cam.fov !== fov) { z.cam.fov = fov; z.cam.updateProjectionMatrix(); }
+    z.cam.up.set(Math.abs(dy) > 0.99 ? 0 : 0, Math.abs(dy) > 0.99 ? 0 : 1, Math.abs(dy) > 0.99 ? -1 : 0);
+    z.cam.position.copy(p); z.cam.lookAt(p.x + dx, p.y + dy, p.z + dz); z.cam.updateMatrixWorld();
     z.m.copy(U.uInvProjView.value); const keepD = U.uDepth.value;
     U.uInvProjView.value.copy(z.cam.projectionMatrixInverse).premultiply(z.cam.matrixWorld); U.uDepth.value = z.dep;
     r.setRenderTarget(z.rt); r.clear(); r.render(this.clouds.scene, CAM);
     U.uInvProjView.value.copy(z.m); U.uDepth.value = keepD;
     r.readRenderTargetPixels(z.rt, 0, 0, 4, 4, z.buf);
     let T = 0; for (let i = 3; i < 64; i += 4) T += z.buf[i] / 255;
-    T /= 16; this.zenithT = T;
-    // a little hysteresis so a ragged cloud edge doesn't flicker the rain on and off
-    const clear = this.precip.clearUp ? T > 0.8 : T > 0.85;
-    if (clear !== !!this.precip.clearUp) this.precip.setClearUp(clear);
+    return T / 16;
   }
   applyTimeDependent() {
     const U = this.U, sunAlt = this.sm.sun.alt;
@@ -604,7 +622,8 @@ export class Immersive {
     U.uExposure.value = E;
     this.final.mat.uniforms.uScot.value = this.cameraMode ? 0 : smooth(0.004, 0.0002, this.adaptL) * 0.6;
     this.final.mat.uniforms.uCam.value = this.cameraMode && night ? 1 : 0;
-    U.uMoonCam.value = this.cameraMode && night ? 1 : 0;   // Moon: blown out with glare in camera mode, only slightly in the eye view
+    U.uMoonCam.value = this.cameraMode && night ? 1 : 0;
+    U.uMoonGlare.value = smooth(8, 25, cam.fov);   // zoomed in (binoculars, telescope) the glare is left as before   // Moon: blown out with glare in camera mode, only slightly in the eye view
     // pixel solid angle for point sources
     const pxRad = (cam.fov * DEG) / (this.el.clientHeight * this.q.dpr);
     U.uPxSr.value = pxRad * pxRad; U.uPxScale.value = this.q.dpr;
@@ -613,6 +632,9 @@ export class Immersive {
       const sqm = lum2mag(Math.max(this.adaptL, 1e-5)), lim = 7.93 - 5 * Math.log10(Math.pow(10, 4.316 - sqm / 5) + 1);
       const simDate = new Date(this.date.getTime() + (performance.now() - (this.dateSetAt || performance.now())));   // satellites keep moving in real time
       U.uAGT.value = (simDate.getTime() / 1000) % 864000;   // airglow waves drift with the clock and the time slider
+      // aurora clock: simulated seconds since local solar noon (wraps at noon, when no aurora shows; small numbers keep
+      // float precision for the fast shimmer)
+      U.uAurT.value = (((simDate.getTime() / 1000 - (12 - this.ctx.lon / 15) * 3600) % 86400) + 86400) % 86400;
       const m = this.U.uEqToWorld.value.elements, rm = [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]];
       this.events.update(now, simDate, this.ctx, rm, lim, this.sm.sun.alt);
     }
@@ -634,6 +656,7 @@ export class Immersive {
     U.uDepth.value = this.rtMain.depthTexture;
     r.setRenderTarget(this.rtCloud); r.clear(); r.render(this.clouds.scene, CAM);
     this.zenithProbe(now, cam);
+    this.moonProbe(now, cam);
     // Accumulate jittered cloud frames. Small view changes (hand shake, phone sensors) keep part of the history;
     // big turns, moves or a new time start over.
     const A = this.accLast || {}, dAng = Math.abs(((this.yaw - (A.yaw ?? 1e9)) + 540) % 360 - 180) + Math.abs(this.pitch - (A.pitch ?? 0)) + Math.abs(this.fov - (A.fov ?? 0)) * 0.5;
