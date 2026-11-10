@@ -19,6 +19,7 @@ export function makeSkyLUT(renderer, U) {
       uniform float uAOD, uObsKm, uExposure, uNatSky, uLPScale, uTime;
       uniform sampler2D uLPSky; uniform float uHasLP;
       uniform float uAGT;   // simulated time for airglow motion (s, wrapped)
+      uniform float uTwAmb; // twilight skylight in Earth's shadow (cd/m2 at the zenith), set from the sun's depression
       float agHash(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
       float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
         return mix(mix(agHash(i), agHash(i+vec2(1,0)), f.x), mix(agHash(i+vec2(0,1)), agHash(i+vec2(1,1)), f.x), f.y); }
@@ -119,13 +120,24 @@ export function makeSkyLUT(renderer, U) {
         vec3 diffuse = vec3(0.9, 0.95, 1.0) * uNatSky * 0.15 * extn;
         vec3 nat = (airglow + zodiacal + diffuse);
         vec3 lp = lpSky(rd) * uLPScale * vec3(1.0, 0.86, 0.68);
-        vec3 col = L + nat + lp;
+        // Twilight: air inside Earth's shadow is still lit by light scattered from the bright twilight sky, so the
+        // shadow side and the zenith stay a modest fraction of the glow instead of going black. Bluish (ozone),
+        // somewhat brighter low down and toward the sun; zero in daylight and at night.
+        vec3 tw = vec3(0.0);
+        if (uTwAmb > 0.0) {
+          float sh2 = sin(max(h, 0.0));
+          float fh = pow(1.25/(sh2 + 0.25), 0.6);
+          vec2 sz = normalize(vec2(uSunDir.x, uSunDir.z) + 1e-5), rz = normalize(vec2(rd.x, rd.z) + 1e-5);
+          float fa = 1.0 + 0.35*dot(sz, rz)*(1.0 - sh2);
+          tw = vec3(0.62, 0.86, 1.25) * uTwAmb * fh * fa * exp(-0.12*min(X, 30.0));
+        }
+        vec3 col = L + nat + lp + tw;
         if (ground) col = col * 0.6 + T * vec3(0.05) * (uSunE * max(uSunDir.y, 0.0) + uMoonE*max(uMoonDir.y,0.0)) / PI * 0.0;
         gl_FragColor = vec4(min(col * uExposure, vec3(60000.0)), 1.0);
       }`,
   });
   Object.assign(U, {
-    uAGT: { value: 0 }, uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
+    uAGT: { value: 0 }, uTwAmb: { value: 0 }, uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
     uEclip: { value: new THREE.Matrix3() },
   });
   const scene = new THREE.Scene(), cam = new THREE.Camera();
@@ -169,6 +181,10 @@ export function makeSkyBackground(U, mwTex) {
       // auroral heights; which = 0 nearer crossing, 1 farther. -1 if none.
       // aurora brightness (kR) where a ray meets the emitting layer, from NOAA-style chance of aurora at that spot:
       // none below 10 %, about airglow brightness at 10 %, a little brighter at 25 %, vivid from ~75 %
+      float auroraP(vec3 P){   // chance of aurora (0-100 %) at an Earth-fixed point
+        float r = length(P), la = asin(clamp(P.z/r, -1.0, 1.0))*57.29578, lo = atan(P.y, P.x)*57.29578;
+        return texture(uAurP, vec2(fract((lo + 0.5)/360.0), (la + 90.5)/181.0)).r*255.0;
+      }
       float auroraKR(vec3 P, float kp){
         float r = length(P), la = asin(clamp(P.z/r, -1.0, 1.0))*57.29578, lo = atan(P.y, P.x)*57.29578;
         float p = texture(uAurP, vec2(fract((lo + 0.5)/360.0), (la + 90.5)/181.0)).r*255.0;
@@ -240,15 +256,16 @@ export function makeSkyBackground(U, mwTex) {
               float kR = auroraKR(O + dE*t, kp); if (kR <= 0.0) continue;
               // rays follow the magnetic field, so they vary only along the arc: vertical streaks that slide and flicker
               float rx = mlon*1400.0;
-              float rays = 0.25 + 0.75*pow(vnoise(vec2(rx - tt*(0.6 + 2.5*act), fi*11.0)), 2.0) + 0.45*pow(vnoise(vec2(rx*0.23 + tt*0.25*act, fi*3.0 + 1.0)), 3.0);
+              // soft rays (real curtains are striated but fuzzy, not sharp lines)
+              float rays = 0.55 + 0.35*vnoise(vec2(rx - tt*(0.6 + 2.5*act), fi*11.0)) + 0.3*vnoise(vec2(rx*0.23 + tt*0.25*act, fi*3.0 + 1.0));
               float hb = 102.0 + 10.0*vnoise(vec2(mlon*60.0, fi*2.0 + tt*0.01));
-              float gP = smoothstep(hb - 4.0, hb + 1.0, h) * exp(-max(h - hb, 0.0)/(32.0 + 20.0*rays));
+              float gP = smoothstep(hb - 12.0, hb + 4.0, h) * exp(-max(h - hb, 0.0)/(40.0 + 15.0*rays));   // fuzzy lower edge
               float rP = exp(-pow((h - 230.0)/65.0, 2.0));
               float pP = exp(-pow((h - hb + 2.0)/4.0, 2.0));
               vec3 nrm = normalize(A - dot(A, Pn)*Pn);                   // across the sheet
-              float geo = clamp(0.6/max(abs(dot(nrm, dE)), 0.05), 0.6, 4.0); // a thin sheet seen edge-on collects more light
+              float geo = clamp(0.5/max(abs(dot(nrm, dE)), 0.12), 0.5, 2.0); // seen edge-on a sheet collects more light (softened)
               float pulse = 1.0 + 0.35*act*sin(tt*(1.3 + fi) + mlon*30.0);
-              float I = amp*rays*geo*pulse*kR;
+              float I = 0.6*amp*rays*geo*pulse*kR;
               grAcc += I*gP; redAcc += I*rP; pinkAcc += I*pP;
             }
           }
@@ -257,19 +274,28 @@ export function makeSkyBackground(U, mwTex) {
             float b = dot(O, dE), c = dot(O, O) - 6486.0*6486.0;
             float tk = -b + sqrt(max(b*b - c, 0.0)); vec3 Pn = normalize(O + dE*tk);
             float slant = min(5.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/6486.0, 2.0)), 0.2));
-            grAcc += 0.3*auroraKR(O + dE*tk, kp)*slant;
+            // diffuse luminous band filling the oval: soft blobs and folds along it that drift and swell (the "glow" in photos)
+            float mlat = asin(clamp(dot(Pn, A), -1.0, 1.0)), mlo = atan(dot(Pn, refB), dot(Pn, refA));
+            float patchy = 0.45 + 0.9*fbm2(vec2(mlat*45.0 + 0.3*sin(mlo*5.0 + tt*0.05*act), mlo*7.0 + tt*0.006*(1.0 + 2.0*act)));
+            float swell = 1.0 + 0.25*act*sin(tt*0.35 + mlo*9.0);
+            // in storms the bright green sits in the high-chance core of the oval; its equatorward fringe glows mostly red
+            float stormF = smoothstep(5.0, 7.0, kp), gw = mix(1.0, smoothstep(25.0, 75.0, auroraP(O + dE*tk)), stormF);
+            grAcc += 0.55*auroraKR(O + dE*tk, kp)*slant*patchy*swell*gw;
+            float c2 = dot(O, O) - 6531.0*6531.0, t2b = -b + sqrt(max(b*b - c2, 0.0));
+            float patchy2 = 0.5 + 0.8*fbm2(vec2(mlat*30.0 + 4.0, mlo*5.0 - tt*0.004*(1.0 + 2.0*act)));
+            grAcc += 0.22*auroraKR(O + dE*t2b, kp)*min(4.0, slant)*patchy2;
             // storm-time red glow from ~300 km (high enough to be seen far equatorward of the green arcs)
             if (kp > 5.0) {
               float c3 = dot(O, O) - 6671.0*6671.0, t3 = -b + sqrt(max(b*b - c3, 0.0));
               float slant3 = min(4.0, 1.0/max(sqrt(1.0 - pow(6371.0*cos(asin(clamp(sh, -1.0, 1.0)))/6671.0, 2.0)), 0.25));
-              redAcc += 0.35*auroraKR(O + dE*t3, kp)*slant3;
+              redAcc += 0.6*auroraKR(O + dE*t3, kp)*slant3*(0.6 + 0.8*fbm2(vec2(tt*0.003, 0.0) + normalize(O + dE*t3).xy*40.0));
             }
           }
           // uAurora.z: brightness in kR (a 1 kR green aurora is ~1.9e-4 cd/m^2)
           // quiet and moderate activity: green (557.7 nm, ~100-150 km) only; red 630 nm tops (~200-300 km) and the pink
           // N2 lower fringe (~95 km) appear only in geomagnetic storms
           float pinkF = smoothstep(6.0, 8.0, kp), redF = smoothstep(5.0, 7.0, kp);
-          vec3 aur = (vec3(0.15, 1.0, 0.35)*grAcc + vec3(1.0, 0.12, 0.25)*redAcc*redF*1.2 + vec3(1.0, 0.25, 0.6)*pinkAcc*0.6*pinkF) * 1.9e-4;
+          vec3 aur = (vec3(0.15, 1.0, 0.35)*grAcc + vec3(1.0, 0.16, 0.6)*redAcc*redF*0.8 + vec3(1.0, 0.3, 0.65)*pinkAcc*0.5*pinkF) * 1.9e-4;
           col += aur * directT(max(sh, 0.0)) * uExposure * smoothstep(-0.02, 0.02, sh);
         }
         gl_FragColor = vec4(min(col, vec3(3.0e4)), 1.0);

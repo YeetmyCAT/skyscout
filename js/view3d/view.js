@@ -280,6 +280,8 @@ export class Immersive {
   applyTimeDependent() {
     const U = this.U, sunAlt = this.sm.sun.alt;
     U.uNight.value = smooth(-0.5, -5, sunAlt);
+    // twilight skylight in Earth's shadow: follows the glow's brightness (~1/25 of it at the zenith), only while the sun is down
+    U.uTwAmb.value = sunAlt < 1 && sunAlt > -19 ? 92 * Math.pow(10, 0.354 * sunAlt) * smooth(1, -1.5, sunAlt) : 0;
     const local = new Date(this.date.getTime() + ((this.ctx.utcOffset || 0) - (-this.date.getTimezoneOffset() * 60)) * 1000);
     const h = local.getHours() + local.getMinutes() / 60;
     const lit = h >= 17 || h < 1 ? 0.55 - Math.max(0, h - 21) * 0.06 : h < 5 ? 0.08 : h < 8 ? 0.3 : 0.15;
