@@ -68,8 +68,10 @@ function setTime(d, from) {
   S.time = d;
   if (from !== 'slider') $('#time').value = Math.round((d - S.t0) / 900e3);
   showTime();
+  // sprite "storms have moved" prompt: checked at once, so nothing slower (or failing) later can hold it back
+  if (S.view && S.view.running) checkSpritePrompt();
   clearTimeout(timeTimer);
-  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) { S.view.setTime(S.time); checkSpritePrompt(); } }, from === 'slider' ? 60 : 0);
+  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) { S.view.setTime(S.time); } }, from === 'slider' ? 60 : 0);
   if (S.view && S.view.running && from === 'play') S.view.setTime(S.time);
 }
 
@@ -717,12 +719,17 @@ function openSpriteSpot(r, name) {
   setTime(new Date(r.t * 1000));
   open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config, stormAt: S.spriteRes.stormAt } });
 }
-// Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
+// Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time. The marks are
+// fixed at 3, 6, 9 … hours from when the sprite view opened (either way in time), and each mark pops up as soon as it is
+// crossed (re-crossing the mark that just popped, e.g. stepping back over it, does not pop it again).
 function checkSpritePrompt() {
   const sv = S.spriteView, res = S.spriteRes; if (!sv || !res || !res.all || !S.view || !S.view.running) return;
-  const t = S.time.getTime() / 1000;
-  if (Math.abs(t - sv.t0) < 3 * 3600) return;
-  sv.t0 = t;
+  const t = S.time.getTime() / 1000, m = Math.floor((t - sv.t0) / (3 * 3600)), pm = sv.m || 0;
+  if (m === pm) return;
+  sv.m = m;
+  const mark = m > pm ? m : m + 1;   // the 3-hour line just crossed
+  if (mark === (sv.mark || 0)) return;
+  sv.mark = mark;
   const hourly = res.all.filter(r => Math.abs(r.t - t) <= 1800).sort((a, b) => b.score - a.score);
   let box = $('#spritePrompt');
   if (!box) { box = el('div', { id: 'spritePrompt', class: 'hud card' }); $('#view3d').append(box); }
