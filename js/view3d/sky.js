@@ -449,35 +449,43 @@ export function bvToRGB(bv) {
 
 // Moon: lit sphere with procedural maria, correct phase from the true Sun direction, earthshine, extinction.
 export function makeMoon(U) {
-  Object.assign(U, { uMoonLight: { value: new THREE.Vector3() }, uMoonRadius: { value: 0.0045 }, uMoonLum: { value: 2500 } });
+  Object.assign(U, { uMoonLight: { value: new THREE.Vector3() }, uMoonRadius: { value: 0.0045 }, uMoonLum: { value: 2500 }, uMoonGain: { value: 1 }, uMoonAvg: { value: 0 }, uMoonCam: { value: 0 } });
   const geo = new THREE.PlaneGeometry(2, 2);
   const mat = new THREE.ShaderMaterial({
     uniforms: U, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     vertexShader: /* glsl */`
       #include <common>
-      uniform vec3 uMoonDir; uniform float uMoonRadius; out vec2 vP;
+      uniform vec3 uMoonDir; uniform float uMoonRadius, uPxSr, uMoonCam; out vec2 vP; out float vQ;
       #include <logdepthbuf_pars_vertex>
       void main(){
         vP = position.xy;
+        // at least ~1.5 px across so the Moon can't fall between pixels; a camera also gets room for the glare
+        // around an overexposed Moon (vQ = quad size / true size)
+        float Rq = max(uMoonRadius, 1.5*sqrt(uPxSr)) * mix(1.0, 7.0, uMoonCam); vQ = Rq/uMoonRadius;
         vec3 f = normalize(uMoonDir), up0 = abs(f.y) > 0.99 ? vec3(1,0,0) : vec3(0,1,0);
-        vec3 r = normalize(cross(up0, f)), u = cross(f, r);
-        float s = tan(uMoonRadius) * 1.0e6 * 1.02;
+        // r = screen right, u = up: the quad faces the camera (it was wound away from it and culled, and mirrored)
+        vec3 r = normalize(cross(f, up0)), u = cross(r, f);
+        float s = tan(Rq) * 1.0e6 * 1.02;
         vec3 w = cameraPosition + f*1.0e6 + (r*position.x + u*position.y)*s;
         gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
         #include <logdepthbuf_vertex>
       }`,
     fragmentShader: COMMON + /* glsl */`
-      in vec2 vP; uniform vec3 uMoonLight; uniform float uMoonLum;
+      in vec2 vP; in float vQ; uniform vec3 uMoonLight; uniform float uMoonLum, uMoonGain, uMoonAvg, uPxSr, uMoonRadius, uMoonCam;
       #include <logdepthbuf_pars_fragment>
       void main(){
         #include <logdepthbuf_fragment>
-        float r2 = dot(vP, vP); if (r2 > 1.0) discard;
+        if (dot(vP, vP) > 1.0) discard;
         vec3 f = normalize(uMoonDir), up0 = abs(f.y) > 0.99 ? vec3(1,0,0) : vec3(0,1,0);
-        vec3 rr = normalize(cross(up0, f)), uu = cross(f, rr);
-        vec3 n = normalize(rr*vP.x + uu*vP.y - f*sqrt(1.0 - r2)); // surface normal facing us
+        vec3 T = directT(uMoonDir.y);
+        vec2 q = vP*vQ; float r2 = dot(q, q);
+        vec3 det = vec3(0.0);
+        if (r2 <= 1.0) {
+        vec3 rr = normalize(cross(f, up0)), uu = cross(rr, f);
+        vec3 n = normalize(rr*q.x + uu*q.y - f*sqrt(1.0 - r2)); // surface normal facing us
         float ci = dot(n, uMoonLight), ce = sqrt(1.0 - r2);
         // selenographic-ish coordinates for maria (near side faces Earth; north roughly toward celestial north)
-        vec2 sl = vP;
+        vec2 sl = q;
         float maria = 0.0;
         maria += smoothstep(0.32, 0.0, length((sl - vec2(-0.35, 0.42))*vec2(1.0,1.3)));  // Imbrium
         maria += smoothstep(0.22, 0.0, length(sl - vec2(0.15, 0.40)));                     // Serenitatis
@@ -490,12 +498,27 @@ export function makeMoon(U) {
         float alb = mix(0.16, 0.075, clamp(maria, 0.0, 1.0)) * (0.85 + 0.3*fbm2(sl*12.0));
         alb += 0.08*smoothstep(0.06, 0.0, length(sl - vec2(-0.15, -0.72)));                 // Tycho
         float ls = ci > 0.0 ? ci/(ci + ce) : 0.0;          // Lommel-Seeliger
-        float L = uMoonLum * alb/0.12 * ls * 2.0;
+        float L = uMoonLum * uMoonGain * alb/0.12 * ls * 2.0;   // sunlit part follows the phase curve; earthshine doesn't
         float earthshine = uMoonLum * 1.2e-4 * alb/0.12 * (0.5 - 0.5*dot(uMoonLight, -f));
-        vec3 T = directT(uMoonDir.y);
-        vec3 c = vec3(1.0, 0.95, 0.88) * (L + earthshine) * T * uExposure;
-        float edge = smoothstep(1.0, 0.96, r2);
-        gl_FragColor = vec4(min(c * edge * smoothstep(-0.01, 0.005, uMoonDir.y), vec3(3.0e4)), 1.0);
+        det = vec3(1.0, 0.95, 0.88) * (L + earthshine) * T * uExposure * smoothstep(1.0, 0.96, r2);
+        }
+        // only a few pixels across: shade the disc evenly with its mean brightness for this phase (spread over at
+        // least ~1.5 px), so its whole light reaches the image; a thin crescent no longer falls between pixel samples
+        float Rs = max(uMoonRadius, 1.5*sqrt(uPxSr)), ks = uMoonRadius/Rs;
+        vec2 qs = q*ks;
+        vec3 avg = dot(qs, qs) <= 1.0 ? vec3(1.0, 0.95, 0.88) * uMoonAvg * ks*ks * T * uExposure : vec3(0.0);
+        float w = smoothstep(3.0, 8.0, uMoonRadius/sqrt(uPxSr));
+        vec3 c = mix(avg, det, w);
+        // the eye's wide dynamic range: the disc is only slightly overexposed (sunlit surface just past white,
+        // maria still visible); a camera exposing for the night sky blows it out
+        float peak = mix(uMoonAvg*ks*ks, uMoonLum*uMoonGain, w) * dot(T, vec3(0.2126, 0.7152, 0.0722)) * uExposure;
+        c *= mix(min(1.0, 3.5/max(peak, 1e-6)), 1.0, uMoonCam);
+        // camera: glare from lens and sensor around the overexposed Moon, scaled by its total light
+        if (uMoonCam > 0.0) {
+          float d = max(length(q), 1.0);
+          c += vec3(1.0, 0.95, 0.88) * uMoonAvg * T * uExposure * 0.02 * exp(-(d - 1.0)*1.2)/(d*d) * uMoonCam * step(1.0, length(q));
+        }
+        gl_FragColor = vec4(min(c * smoothstep(-0.01, 0.005, uMoonDir.y), vec3(3.0e4)), 1.0);
       }`,
   });
   const m = new THREE.Mesh(geo, mat); m.frustumCulled = false; m.renderOrder = -80;

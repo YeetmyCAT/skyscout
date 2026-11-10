@@ -25,6 +25,26 @@ function fsPass(frag, uniforms, opts = {}) {
 }
 const CAM = new THREE.Camera();
 
+
+// Ratio of the Moon's measured brightness at phase angle a (degrees) to what the disc shader's Lommel-Seeliger
+// shading gives on its own (both relative to full), so the rendered disc has the real total brightness.
+const moonGainCache = new Map();
+function moonPhaseGain(a) {
+  const key = Math.round(Math.max(0, Math.min(179, a)));
+  if (moonGainCache.has(key)) return moonGainCache.get(key);
+  const ls = al => {
+    const r = al * Math.PI / 180, lx = Math.sin(r), lz = Math.cos(r), N = 64; let s = 0;
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const x = (i + 0.5) / N * 2 - 1, y = (j + 0.5) / N * 2 - 1, r2 = x * x + y * y; if (r2 >= 1) continue;
+      const ce = Math.sqrt(1 - r2), ci = x * lx + ce * lz; if (ci > 0) s += ci / (ci + ce);
+    }
+    return s;
+  };
+  const real = Math.pow(10, -0.4 * (0.026 * key + 4e-9 * key ** 4)), s0 = ls(0), sa = ls(key);
+  const g = { gain: real / Math.max(sa / s0, 1e-6), lsMean: sa / s0 * 0.5 };   // full Moon: Lommel-Seeliger = 0.5 everywhere
+  moonGainCache.set(key, g);
+  return g;
+}
 export class Immersive {
   constructor(container, assets) {
     this.el = container; this.assets = assets;
@@ -231,7 +251,13 @@ export class Immersive {
     const AU = 1.496e8, ml = new THREE.Vector3(...sv).multiplyScalar(AU).sub(new THREE.Vector3(...mv).multiplyScalar(sm.moonDistKm)).normalize();
     U.uMoonLight.value.copy(ml);
     U.uMoonRadius.value = Math.atan(1737.4 / sm.moonDistKm);
+    // full-Moon surface luminance, scaled so the disc's total brightness follows the Moon's measured phase curve
+    // (V = -12.73 + 0.026a + 4e-9 a^4; a quarter Moon is ~1/11 of full, not 1/2, because of shadowing)
     U.uMoonLum.value = 2900;
+    const moonPA = Math.acos(Math.max(-1, Math.min(1, -ml.dot(new THREE.Vector3(...mv))))) / DEG, md = moonPhaseGain(moonPA);
+    U.uMoonGain.value = md.gain;
+    // mean radiance over the disc (sunlit part + earthshine), used when the Moon is only a few pixels wide
+    U.uMoonAvg.value = 2900 * (md.gain * 2 * md.lsMean + 1.2e-4 * (0.5 - 0.5 * Math.cos(moonPA * DEG)));
     // sky rotation
     const m = eqjToWorld(date, observer(lat, lon, groundZ));
     U.uEqToWorld.value.set(...m); this.overlays.setEq(m);
@@ -578,6 +604,7 @@ export class Immersive {
     U.uExposure.value = E;
     this.final.mat.uniforms.uScot.value = this.cameraMode ? 0 : smooth(0.004, 0.0002, this.adaptL) * 0.6;
     this.final.mat.uniforms.uCam.value = this.cameraMode && night ? 1 : 0;
+    U.uMoonCam.value = this.cameraMode && night ? 1 : 0;   // Moon: blown out with glare in camera mode, only slightly in the eye view
     // pixel solid angle for point sources
     const pxRad = (cam.fov * DEG) / (this.el.clientHeight * this.q.dpr);
     U.uPxSr.value = pxRad * pxRad; U.uPxScale.value = this.q.dpr;
