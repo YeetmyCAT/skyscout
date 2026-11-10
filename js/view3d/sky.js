@@ -129,7 +129,7 @@ export function makeSkyLUT(renderer, U) {
           float fh = pow(1.25/(sh2 + 0.25), 0.6);
           vec2 sz = normalize(vec2(uSunDir.x, uSunDir.z) + 1e-5), rz = normalize(vec2(rd.x, rd.z) + 1e-5);
           float fa = 1.0 + 0.35*dot(sz, rz)*(1.0 - sh2);
-          tw = vec3(0.62, 0.86, 1.25) * uTwAmb * fh * fa * exp(-0.12*min(X, 30.0));
+          tw = vec3(0.55, 0.85, 1.38) * uTwAmb * fh * fa * exp(-0.05*min(X, 30.0));
         }
         vec3 col = L + nat + lp + tw;
         if (ground) col = col * 0.6 + T * vec3(0.05) * (uSunE * max(uSunDir.y, 0.0) + uMoonE*max(uMoonDir.y,0.0)) / PI * 0.0;
@@ -190,7 +190,7 @@ export function makeSkyBackground(U, mwTex) {
         float p = texture(uAurP, vec2(fract((lo + 0.5)/360.0), (la + 90.5)/181.0)).r*255.0;
         return p < 8.0 ? 0.0 : 0.25*pow(p/10.0, 1.9)*smoothstep(8.0, 10.0, p)*(1.0 + max(kp - 5.0, 0.0)*0.6);
       }
-      float auroraSheet(vec3 O, vec3 D, vec3 A, float phi, float hemi, int which){
+      float auroraSheet(vec3 O, vec3 D, vec3 A, float phi, float hemi, int which, float hmin, float hmax){
         float S = sin(phi); S *= S;
         float b = dot(O, D), c = dot(O, O), a0 = dot(O, A), a1 = dot(D, A);
         float qa = a1*a1 - S, qb = 2.0*(a0*a1 - S*b), qc = a0*a0 - S*c;
@@ -199,7 +199,19 @@ export function makeSkyBackground(U, mwTex) {
         float t = which == 0 ? min(r1, r2) : max(r1, r2);
         if (t <= 0.0 || (a0 + t*a1)*hemi <= 0.0) return -1.0;
         float h = length(O + D*t) - 6371.0;
-        return (h < 85.0 || h > 420.0) ? -1.0 : t;
+        return (h < hmin || h > hmax) ? -1.0 : t;
+      }
+      // how close an Earth-fixed point is to the arcs actually showing (their magnetic latitudes and lit segments):
+      // the diffuse green glow surrounds the aurora instead of filling the whole region where aurora is possible
+      float auroraHalo(vec3 Pn, vec3 A, vec3 refA, vec3 refB, float tt, float act){
+        float ml = abs(asin(clamp(dot(Pn, A), -1.0, 1.0))), mlo = atan(dot(Pn, refB), dot(Pn, refA)), hs = 0.0;
+        for (int i = 0; i < 5; i++) {
+          float fi = float(i), lat0 = uAurora.x + (fi - 2.0)*uAurora.y, dl = (ml - lat0)/0.026;
+          if (abs(dl) > 3.0) continue;
+          float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlo*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));
+          hs += (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg * exp(-dl*dl);
+        }
+        return min(hs, 1.0);
       }
       void main(){
         vec3 d = normalize(vDir);
@@ -240,15 +252,18 @@ export function makeSkyBackground(U, mwTex) {
           for (int i = 0; i < 5; i++) {
             float fi = float(i), lat0 = uAurora.x + (fi - 2.0)*uAurora.y;   // arcs spread across the oval
             for (int w = 0; w < 2; w++) {                                 // near and far crossing of the sheet
-              float t = auroraSheet(O, dE, A, lat0, hemi, w);
+              // the unfolded arc only finds where along the ray to look: its height window is wider than the
+              // emitting layer's, or the folded curtain's lower part gets cut off in a hard line
+              float t = auroraSheet(O, dE, A, lat0, hemi, w, 40.0, 600.0);
               if (t < 0.0) continue;
               vec3 Pn = normalize(O + dE*t);
               float mlon = atan(dot(Pn, refB), dot(Pn, refA));
               // folds: large slow meanders plus small fast curls
               float fold = 0.009*(fbm2(vec2(mlon*7.0 + fi*3.1, tt*0.004*(1.0 + 3.0*act))) - 0.5)
                          + 0.0025*(vnoise(vec2(mlon*45.0 - tt*0.02*(1.0 + 4.0*act), fi*5.0)) - 0.5);
-              float t2 = auroraSheet(O, dE, A, lat0 + fold, hemi, w);
-              if (t2 > 0.0) { t = t2; Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA)); }
+              float t2 = auroraSheet(O, dE, A, lat0 + fold, hemi, w, 85.0, 420.0);
+              if (t2 <= 0.0) continue;                                      // no curtain here (no jump back to the unfolded arc)
+              t = t2; Pn = normalize(O + dE*t); mlon = atan(dot(Pn, refB), dot(Pn, refA));
               float h = length(O + dE*t) - 6371.0;
               float seg = smoothstep(0.32, 0.62, fbm2(vec2(mlon*4.0 + fi*7.3 + tt*0.002*(1.0 + 2.0*act), fi)));   // arcs come in segments
               float amp = (i == 2 ? 1.0 : i == 1 || i == 3 ? 0.8 : 0.6) * seg;
@@ -280,10 +295,10 @@ export function makeSkyBackground(U, mwTex) {
             float swell = 1.0 + 0.25*act*sin(tt*0.35 + mlo*9.0);
             // in storms the bright green sits in the high-chance core of the oval; its equatorward fringe glows mostly red
             float stormF = smoothstep(5.0, 7.0, kp), gw = mix(1.0, smoothstep(25.0, 75.0, auroraP(O + dE*tk)), stormF);
-            grAcc += 0.55*auroraKR(O + dE*tk, kp)*slant*patchy*swell*gw;
+            grAcc += 0.55*auroraKR(O + dE*tk, kp)*slant*patchy*swell*gw*auroraHalo(Pn, A, refA, refB, tt, act);
             float c2 = dot(O, O) - 6531.0*6531.0, t2b = -b + sqrt(max(b*b - c2, 0.0));
             float patchy2 = 0.5 + 0.8*fbm2(vec2(mlat*30.0 + 4.0, mlo*5.0 - tt*0.004*(1.0 + 2.0*act)));
-            grAcc += 0.22*auroraKR(O + dE*t2b, kp)*min(4.0, slant)*patchy2;
+            grAcc += 0.22*auroraKR(O + dE*t2b, kp)*min(4.0, slant)*patchy2*auroraHalo(normalize(O + dE*t2b), A, refA, refB, tt, act);
             // storm-time red glow from ~300 km (high enough to be seen far equatorward of the green arcs)
             if (kp > 5.0) {
               float c3 = dot(O, O) - 6671.0*6671.0, t3 = -b + sqrt(max(b*b - c3, 0.0));

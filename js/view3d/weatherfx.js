@@ -99,10 +99,16 @@ export class Precip {
     // rain: light < 2.5 mm/h, moderate 2.5-7.6, heavy above; snow (water equivalent): light < 0.5, moderate 0.5-1.5, heavy above
     const lvl = type === 'snow' ? rate / 0.5 : rate / 2.5;   // 1 = top of "light"
     const f = type === 'none' || rate <= 0 ? 0 : Math.min(1, lvl < 1 ? 0.06 + 0.24 * lvl : lvl < 3 ? 0.3 + 0.3 * (lvl - 1) / 2 : 0.6 + 0.4 * Math.min(1, (lvl - 3) / 3));
-    this.U.uPrecipRate.value = f;
-    this.rain.visible = type === 'rain' || type === 'freezing';
-    this.snow.visible = type === 'snow';
+    this.U.uPrecipRate.value = f; this.type = type;
+    this.rain.visible = !this.clearUp && (type === 'rain' || type === 'freezing');
+    this.snow.visible = !this.clearUp && type === 'snow';
     this.U.uWindVec.value.set(wind[0], wind[1]);
+  }
+  // visual only: no falling rain or snow while the sky straight overhead is clear (the weather itself is unchanged)
+  setClearUp(on) {
+    this.clearUp = on;
+    this.rain.visible = !on && (this.type === 'rain' || this.type === 'freezing');
+    this.snow.visible = !on && this.type === 'snow';
   }
 }
 

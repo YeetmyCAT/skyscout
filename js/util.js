@@ -126,6 +126,19 @@ export const RateLimit = {
   waitMs() { return Math.max(0, this.until - Date.now()); },
 };
 RateLimit.load();
+// one time: before v19 rejected forecast requests (HTTP 400: a 7-model try, then its 3-model retry, weights 51.1 and 21.9)
+// were counted against the quota; drop those pairs from this device's log
+try {
+  if (!localStorage.getItem('ss_om_fix400')) {
+    const L = RateLimit.log, drop = new Set();
+    for (let i = 0; i < L.length; i++) if (Math.abs(L[i][1] - 21.9) < 0.01) {
+      drop.add(i);
+      for (let j = i - 1; j >= 0 && L[i][0] - L[j][0] < 15000; j--) if (Math.abs(L[j][1] - 51.1) < 0.01 && !drop.has(j)) { drop.add(j); break; }
+    }
+    if (drop.size) { RateLimit.log = L.filter((e, i) => !drop.has(i)); RateLimit.save(); }
+    localStorage.setItem('ss_om_fix400', '1');
+  }
+} catch { }
 // tabs and the home-screen app on this device share one log (another device can't be seen without a server)
 try { addEventListener('storage', e => { if (e.key === 'ss_om_use' || e.key === 'ss_om_until') RateLimit.load(); }); } catch { }
 const isOpenMeteo = url => /\/\/(api|air-quality-api|ensemble-api)[.]open-meteo[.]com/.test(url);   // the forecast quota (place search is separate)
@@ -146,7 +159,7 @@ export async function cachedJSON(key, url, ttlMs, opts = {}) {
       if ((r.status === 429 || r.status === 503 || r.status === 504) && attempt < 3) { await sleep(4000 * (attempt + 1) ** 2); continue; }
       break;
     }
-    if (om && r.status !== 429) RateLimit.record(url);   // a refused request isn't counted by the service
+    if (om && r.ok) RateLimit.record(url);   // refused or rejected requests (429, 400...) aren't counted by the service
     if (r.status === 429) {
       let reason = ''; try { reason = (await r.json()).reason || ''; } catch { }
       if (om) RateLimit.blocked(reason);

@@ -277,11 +277,39 @@ export class Immersive {
     this.U.uAurora.value.set(O.center * DEG, O.spread * DEG, O.near >= 8 ? 1 : 0, kp);
     this.auroraLive = src.live;
   }
+  // Rain and snow are hidden while the sky straight up is clear (a visual rule only; the weather is unchanged).
+  // A tiny copy of the cloud pass looks at the zenith a few times a second and reports how much sky shows through,
+  // so the precipitation returns as soon as a cloud drifts overhead.
+  zenithProbe(now, cam) {
+    const pn = this.precipNow;
+    if (!pn || pn.type === 'none' || !(pn.rate > 0)) { if (this.precip.clearUp) this.precip.setClearUp(false); return; }
+    if (now - (this.zpLast || 0) < 0.3) return;
+    this.zpLast = now;
+    const r = this.renderer, U = this.U;
+    if (!this.zp) {
+      const rt = new THREE.WebGLRenderTarget(4, 4, { depthBuffer: false });   // 8-bit RGBA: alpha holds the sky transmittance
+      const dep = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); dep.needsUpdate = true;   // nothing in the way
+      const c = new THREE.PerspectiveCamera(20, 1, 1, 1e6); c.up.set(0, 0, -1);
+      this.zp = { rt, dep, cam: c, buf: new Uint8Array(64), m: new THREE.Matrix4() };
+    }
+    const z = this.zp, p = cam.position;
+    z.cam.position.copy(p); z.cam.lookAt(p.x, p.y + 1, p.z); z.cam.updateMatrixWorld();
+    z.m.copy(U.uInvProjView.value); const keepD = U.uDepth.value;
+    U.uInvProjView.value.copy(z.cam.projectionMatrixInverse).premultiply(z.cam.matrixWorld); U.uDepth.value = z.dep;
+    r.setRenderTarget(z.rt); r.clear(); r.render(this.clouds.scene, CAM);
+    U.uInvProjView.value.copy(z.m); U.uDepth.value = keepD;
+    r.readRenderTargetPixels(z.rt, 0, 0, 4, 4, z.buf);
+    let T = 0; for (let i = 3; i < 64; i += 4) T += z.buf[i] / 255;
+    T /= 16; this.zenithT = T;
+    // a little hysteresis so a ragged cloud edge doesn't flicker the rain on and off
+    const clear = this.precip.clearUp ? T > 0.8 : T > 0.85;
+    if (clear !== !!this.precip.clearUp) this.precip.setClearUp(clear);
+  }
   applyTimeDependent() {
     const U = this.U, sunAlt = this.sm.sun.alt;
     U.uNight.value = smooth(-0.5, -5, sunAlt);
     // twilight skylight in Earth's shadow: follows the glow's brightness (~1/25 of it at the zenith), only while the sun is down
-    U.uTwAmb.value = sunAlt < 1 && sunAlt > -19 ? 92 * Math.pow(10, 0.354 * sunAlt) * smooth(1, -1.5, sunAlt) : 0;
+    U.uTwAmb.value = sunAlt < 1 && sunAlt > -19 ? 105 * Math.pow(10, 0.354 * sunAlt) * smooth(1, -1.5, sunAlt) : 0;
     const local = new Date(this.date.getTime() + ((this.ctx.utcOffset || 0) - (-this.date.getTimezoneOffset() * 60)) * 1000);
     const h = local.getHours() + local.getMinutes() / 60;
     const lit = h >= 17 || h < 1 ? 0.55 - Math.max(0, h - 21) * 0.06 : h < 5 ? 0.08 : h < 8 ? 0.3 : 0.15;
@@ -570,7 +598,7 @@ export class Immersive {
     if (this.structures) this.structures.update(now);
     this.lightning.update(dt, now, cam.position, (x, z) => this.ground.heightAt(x, z));
     this.farStorms.update(now, U.uSpriteMode.value > 0.5, this.sm.sun.alt < -12);
-    this.audio.rain(this.precipNow && this.precipNow.type === 'rain' ? Math.min(1, this.precipNow.rate / 4) : 0);
+    this.audio.rain(this.precipNow && this.precipNow.type === 'rain' && !this.precip.clearUp ? Math.min(1, this.precipNow.rate / 4) : 0);
     this.overlays.update(cam, this.el.clientWidth, this.el.clientHeight);
     // passes
     const r = this.renderer;
@@ -578,6 +606,7 @@ export class Immersive {
     r.setRenderTarget(this.rtMain); r.clear(); r.render(this.main, cam);
     U.uDepth.value = this.rtMain.depthTexture;
     r.setRenderTarget(this.rtCloud); r.clear(); r.render(this.clouds.scene, CAM);
+    this.zenithProbe(now, cam);
     // Accumulate jittered cloud frames. Small view changes (hand shake, phone sensors) keep part of the history;
     // big turns, moves or a new time start over.
     const A = this.accLast || {}, dAng = Math.abs(((this.yaw - (A.yaw ?? 1e9)) + 540) % 360 - 180) + Math.abs(this.pitch - (A.pitch ?? 0)) + Math.abs(this.fov - (A.fov ?? 0)) * 0.5;
