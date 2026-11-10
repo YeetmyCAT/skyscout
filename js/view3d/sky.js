@@ -19,6 +19,7 @@ export function makeSkyLUT(renderer, U) {
       uniform float uAOD, uObsKm, uExposure, uNatSky, uLPScale, uTime;
       uniform sampler2D uLPSky; uniform float uHasLP;
       uniform float uAGT;   // simulated time for airglow motion (s, wrapped)
+      uniform float uNoNat; // 1: leave out light from beyond the clouds (airglow, zodiacal light, starlight)
       uniform float uTwAmb; // twilight skylight in Earth's shadow (cd/m2 at the zenith), set from the sun's depression
       float agHash(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
       float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
@@ -131,18 +132,26 @@ export function makeSkyLUT(renderer, U) {
           float fa = 1.0 + 0.35*dot(sz, rz)*(1.0 - sh2);
           tw = vec3(0.55, 0.85, 1.38) * uTwAmb * fh * fa * exp(-0.05*min(X, 30.0));
         }
-        vec3 col = L + nat + lp + tw;
+        vec3 col = L + nat*(1.0 - uNoNat) + lp + tw;
         if (ground) col = col * 0.6 + T * vec3(0.05) * (uSunE * max(uSunDir.y, 0.0) + uMoonE*max(uMoonDir.y,0.0)) / PI * 0.0;
         gl_FragColor = vec4(min(col * uExposure, vec3(60000.0)), 1.0);
       }`,
   });
   Object.assign(U, {
-    uAGT: { value: 0 }, uTwAmb: { value: 0 }, uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
+    uAGT: { value: 0 }, uNoNat: { value: 0 }, uTwAmb: { value: 0 }, uObsKm: { value: 0 }, uNatSky: { value: 1.71e-4 }, uLPScale: { value: 1 }, uLPSky: { value: null }, uHasLP: { value: 0 },
     uEclip: { value: new THREE.Matrix3() },
   });
   const scene = new THREE.Scene(), cam = new THREE.Camera();
   const mesh = new THREE.Mesh(FSQ, mat); mesh.frustumCulled = false; scene.add(mesh);
-  return { rt, render() { const o = renderer.getRenderTarget(); renderer.setRenderTarget(rt); renderer.render(scene, cam); renderer.setRenderTarget(o); } };
+  // a small second copy without the light from beyond the clouds: the haze in front of a cloud is lower air,
+  // so it must not carry airglow waves or zodiacal light onto the cloud
+  const rtLow = new THREE.WebGLRenderTarget(128, 64, { type: THREE.HalfFloatType, magFilter: THREE.LinearFilter, minFilter: THREE.LinearFilter, depthBuffer: false });
+  rtLow.texture.wrapS = THREE.RepeatWrapping;
+  return { rt, rtLow, render() {
+    const o = renderer.getRenderTarget(); renderer.setRenderTarget(rt); renderer.render(scene, cam);
+    U.uNoNat.value = 1; renderer.setRenderTarget(rtLow); renderer.render(scene, cam); U.uNoNat.value = 0;
+    renderer.setRenderTarget(o);
+  } };
 }
 
 // Light-pollution sky texture from the worker output (log-encoded, uniform in sqrt-altitude).

@@ -169,7 +169,7 @@ export function makeCloudPass(U, noise) {
         vec3 col = vec3(0.0); float T = 1.0, dsum = 0.0, wsum = 0.0;
         float cs = dot(rd, uSunDir), cm = dot(rd, uMoonDir);
         float phS = mix(hg(cs, 0.8), hg(cs, -0.25), 0.4), phM = mix(hg(cm, 0.8), hg(cm, -0.25), 0.4);
-        vec3 skyTop = skyL(vec3(0.0, 1.0, 0.0)), skyHz = hazeL(rd);
+        vec3 skyTop = skyL(vec3(0.0, 1.0, 0.0)), skyHz = hazeLx(rd, true);   // haze in front of a cloud: lower air only
         float prev = t0;
         for (int i = 1; i <= 128; i++){
           if (i > N || T < 0.01) break;

@@ -3,7 +3,7 @@ export const COMMON = /* glsl */`
 #ifndef PI
 #define PI 3.141592653589793
 #endif
-uniform sampler2D uSkyLUT;   // pre-exposed sky radiance, u = azimuth/2pi, v = sqrt-altitude mapping
+uniform sampler2D uSkyLUT, uSkyLUTLow;   // pre-exposed sky radiance, u = azimuth/2pi, v = sqrt-altitude mapping
 uniform float uExposure;     // luminance (cd/m^2) -> pre-exposed units
 uniform vec3 uSunDir, uMoonDir;
 uniform vec3 uSunE, uMoonE;  // illuminance at the top of the atmosphere (lux), coloured
@@ -27,12 +27,14 @@ float fbm2(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++){ s += a*
 float ign(vec2 px){ return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }
 // Horizon haze colour. Under a cloud deck it is lit by the dim cloud base, not the open sky,
 // and loses the bright forward-scattering glow around the hidden Sun.
-vec3 hazeL(vec3 dir){
+// low = true: only light from the lower atmosphere (no airglow, zodiacal light or starlight from beyond the clouds)
+vec3 skyS(vec3 d, bool low){ vec2 uv = lutUV(normalize(d)); return low ? texture(uSkyLUTLow, uv).rgb : texture(uSkyLUT, uv).rgb; }
+vec3 hazeLx(vec3 dir, bool low){
   vec3 d = normalize(dir);
-  vec3 b = 0.5*(skyL(normalize(vec3(-uSunDir.x, 0.05, -uSunDir.z) + 1e-4)) + skyL(normalize(vec3(uSunDir.z, 0.05, -uSunDir.x) + 1e-4)));
+  vec3 b = 0.5*(skyS(vec3(-uSunDir.x, 0.05, -uSunDir.z) + 1e-4, low) + skyS(vec3(uSunDir.z, 0.05, -uSunDir.x) + 1e-4, low));
   vec3 a;
   float dep = max(-d.y, 0.0);
-  if (dep < 0.002) a = skyL(normalize(vec3(d.x, max(d.y, 0.01), d.z)));
+  if (dep < 0.002) a = skyS(vec3(d.x, max(d.y, 0.01), d.z), low);
   else {
     // Looking down, the haze between us and the ground scatters light from a wide range of directions, not just
     // the horizon straight ahead. Spread the horizon sample in azimuth more the steeper we look, so a low sun or a
@@ -42,13 +44,14 @@ vec3 hazeL(vec3 dir){
     for (int i = -4; i <= 4; i++) {
       float o = float(i)/4.0, w = 1.0 - 0.6*o*o;
       float az2 = az + o*spread;
-      a += skyL(vec3(sin(az2)*0.9999, 0.012, -cos(az2)*0.9999)) * w; ws += w;
+      a += skyS(vec3(sin(az2)*0.9999, 0.012, -cos(az2)*0.9999), low) * w; ws += w;
     }
     a /= ws;
     a = mix(a, b, smoothstep(0.3, 0.8, dep));   // steep views: plain side-lit haze, no glow direction left
   }
   return mix(a, b, uOvercast) * (1.0 - 0.78*uOvercast);
 }
+vec3 hazeL(vec3 dir){ return hazeLx(dir, false); }
 // Open water: wind ripples, Fresnel reflection of the sky (and skyglow at night), sun/moon glint.
 vec3 waterShade(vec3 W, float rough){
   vec3 V = normalize(W - cameraPosition);

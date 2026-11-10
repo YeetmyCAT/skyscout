@@ -37,13 +37,13 @@ export class Immersive {
     this.camera.rotation.order = 'YXZ';
     this.yaw = 180; this.pitch = 15; this.fov = 70; this.eye = 1.7; this.walk = new THREE.Vector3();
     const U = this.U = {
-      uSkyLUT: { value: null }, uExposure: { value: 1 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
+      uSkyLUT: { value: null }, uSkyLUTLow: { value: null }, uExposure: { value: 1 }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
       uSunE: { value: new THREE.Vector3() }, uMoonE: { value: new THREE.Vector3() }, uAOD: { value: 0.12 }, uTime: { value: 0 }, uNight: { value: 0 },
       uSnow: { value: 0 }, uWet: { value: 0 }, uOvercast: { value: 0 }, uVisKm: { value: 40 }, uFlash: { value: new THREE.Vector4() }, uLogFar: { value: Math.log2(2.2e6 + 1) },
       uInvProjView: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() },
       uLitFrac: { value: 0.5 }, uLeafFrac: { value: 1 }, uAutumn: { value: 0 }, uSpring: { value: 0 }, uGreen: { value: 1 }, uLeafOff: { value: 0 }, uCrop: { value: new THREE.Vector4() },
     };
-    this.lut = makeSkyLUT(r, U); U.uSkyLUT.value = this.lut.rt.texture;
+    this.lut = makeSkyLUT(r, U); U.uSkyLUT.value = this.lut.rt.texture; U.uSkyLUTLow.value = this.lut.rtLow.texture;
     this.main = new THREE.Scene(); this.fg = new THREE.Scene();
     this.skyBg = makeSkyBackground(U, milkyWayPhoto()); this.main.add(this.skyBg);
     this.events = new SkyEvents(U); this.main.add(this.events.group);
