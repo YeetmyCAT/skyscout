@@ -745,7 +745,8 @@ export class Immersive {
     if (this.sm.sun.alt > -1) d.push({ t: 'Sun', alt: this.sm.sun.alt + refraction(this.sm.sun.alt, rk) + 1.2, az: this.sm.sun.az, cls: 'planet sun' });
     for (const dm of this.ctx.domes || []) d.push({ t: `${dm.name || 'Light dome'} glow`, alt: 3 + dm.strength * 4, az: dm.az, cls: 'dome', dome: true });
     const storms = this.farStorms.forecast ? this.farStorms.storms : (this.ctx.sprites || []);
-    for (const s of storms) d.push({ t: `⚡ Storm ${Math.round(s.distKm)} km — sprites ~${(s.spriteAlt ?? 10).toFixed(0)}° up`, alt: Math.max(2, (s.spriteAlt ?? 10) * 0.7), az: s.az, cls: 'storm', always: true });
+    // only storms that can make sprites (the same test that spawns them; Sprite finder spots are sprite storms already) say so
+    for (const s of storms) d.push({ t: s.spriteRate == null || s.spriteRate > 0.15 ? `⚡ Storm ${Math.round(s.distKm)} km — sprites ~${(s.spriteAlt ?? 10).toFixed(0)}° up` : `⚡ Storm ${Math.round(s.distKm)} km`, alt: Math.max(2, (s.spriteAlt ?? 10) * 0.7), az: s.az, cls: 'storm', always: true });
     // Milky Way core
     const m = this.U.uEqToWorld.value.elements, ra = 266.4 * DEG, de = -28.9 * DEG, e = [Math.cos(de) * Math.cos(ra), Math.cos(de) * Math.sin(ra), Math.sin(de)];
     const x = m[0] * e[0] + m[3] * e[1] + m[6] * e[2], y = m[1] * e[0] + m[4] * e[1] + m[7] * e[2], z = m[2] * e[0] + m[5] * e[1] + m[8] * e[2];
