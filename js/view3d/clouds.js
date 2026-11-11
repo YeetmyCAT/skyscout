@@ -26,7 +26,7 @@ export function makeCloudPass(U, noise) {
     uWindLow: { value: new THREE.Vector2() }, uWindMid: { value: new THREE.Vector2() }, uWindHigh: { value: new THREE.Vector2() }, uCirrusDir: { value: new THREE.Vector2(1, 0) },
     uFlux: { value: null }, uFluxHalf: { value: 60000 }, uFluxScale: { value: 9e-4 }, uFluxSnow: { value: 1 },
     uDepth: { value: null }, uLogFar: { value: 1 }, uCamFwd: { value: new THREE.Vector3() }, uSteps: { value: 48 }, uFrame: { value: 0 },
-    uGroundAlb: { value: 0.15 }, uMaxDist: { value: 150000 }, uPrecipSnow: { value: 0 }, uRainNear: { value: 0 },
+    uGroundAlb: { value: 0.15 }, uMaxDist: { value: 150000 }, uPrecipSnow: { value: 0 }, uRainNear: { value: 0 }, uRainCloudsOnly: { value: 0 },
   });
   const mat = new THREE.ShaderMaterial({
     uniforms: U, depthTest: false, depthWrite: false,
@@ -38,7 +38,7 @@ export function makeCloudPass(U, noise) {
       uniform sampler3D uShape, uDetail; uniform sampler2D uWx1, uWx2, uFlux, uDepth;
       uniform float uDomain, uLowBase, uLowTop, uMidBase, uMidTop, uHighBase, uHighTop, uTropo;
       uniform vec2 uWindLow, uWindMid, uWindHigh, uCirrusDir;
-      uniform float uFluxHalf, uFluxScale, uFluxSnow, uSteps, uFrame, uGroundAlb, uMaxDist, uPrecipSnow;
+      uniform float uFluxHalf, uFluxScale, uFluxSnow, uSteps, uFrame, uGroundAlb, uMaxDist, uPrecipSnow, uRainCloudsOnly;
       uniform vec3 uCamPos, uCamFwd;
       const float REFF = ${R_EFF.toFixed(1)};
       float remap(float v, float a, float b, float c, float d){ return c + (v-a)/(b-a)*(d-c); }
@@ -53,7 +53,9 @@ export function makeCloudPass(U, noise) {
         float d = 0.0;
         // ---- low layer
         float lowTop = uLowBase + max(w2.b*6000.0, 250.0);
-        if (w1.r > 0.01 && a > uLowBase - 50.0 && a < lowTop + 400.0){
+        // rain-making clouds only: shallow fair-weather cumulus (under ~1 km deep) can't rain
+        bool rainLow = uRainCloudsOnly < 0.5 || w2.r <= 0.5 || w2.b*6000.0 >= 1000.0;
+        if (rainLow && w1.r > 0.01 && a > uLowBase - 50.0 && a < lowTop + 400.0){
           vec3 q = p + vec3(uWindLow.x, 0.0, uWindLow.y);
           float h = clamp((a - uLowBase)/(lowTop - uLowBase), 0.0, 1.0);
           float cu = w2.r;
@@ -82,8 +84,8 @@ export function makeCloudPass(U, noise) {
           }
           d += max(c, 0.0) * mix(0.025, 0.06, cu) * mix(0.55 + 0.9*sl.g, 1.0, cu);   // stratus: uneven thickness shows as darker patches
         }
-        // ---- mid layer
-        if (w1.g > 0.01 && a > uMidBase - 200.0 && a < uMidTop + 200.0){
+        // ---- mid layer (rain-making clouds only: thick altostratus / nimbostratus, not patchy altocumulus)
+        if ((uRainCloudsOnly < 0.5 || w1.g > 0.75) && w1.g > 0.01 && a > uMidBase - 200.0 && a < uMidTop + 200.0){
           vec3 q = p + vec3(uWindMid.x, 0.0, uWindMid.y);
           float h = clamp((a - uMidBase)/(uMidTop - uMidBase), 0.0, 1.0);
           float cu = w2.r*0.0 + (w1.g > 0.75 ? 0.15 : 0.7);
@@ -95,8 +97,8 @@ export function makeCloudPass(U, noise) {
           if (detail && c > 0.0){ float dn = texture(uDetail, q/700.0).r; c = remap(c, dn*0.3*cu, 1.0, 0.0, 1.0); }
           d += max(c, 0.0) * mix(0.008, 0.02, cu);
         }
-        // ---- high layer: cirrus streaks along the upper wind
-        if (w1.b > 0.01 && a > uHighBase - 300.0 && a < uHighTop + 300.0){
+        // ---- high layer: cirrus streaks along the upper wind (ice: left out when only rain-making clouds are wanted)
+        if (uRainCloudsOnly < 0.5 && w1.b > 0.01 && a > uHighBase - 300.0 && a < uHighTop + 300.0){
           vec2 dir = uCirrusDir; vec2 xz = p.xz + uWindHigh;
           vec2 r = vec2(dot(xz, dir), dot(xz, vec2(-dir.y, dir.x)));
           float h = clamp((a - uHighBase)/(uHighTop - uHighBase), 0.0, 1.0);
@@ -125,7 +127,7 @@ export function makeCloudPass(U, noise) {
         // anvil: spread storm coverage blurred and blown downwind near the tropopause
         float anv = textureLod(uWx1, wxUV(p.xz - uCirrusDir*6000.0), 4.0).a;
         float aTop = max(textureLod(uWx2, wxUV(p.xz - uCirrusDir*6000.0), 4.0).a*20000.0, uHighBase);
-        if (anv > 0.03 && a > aTop - 2600.0 && a < aTop + 200.0){
+        if (uRainCloudsOnly < 0.5 && anv > 0.03 && a > aTop - 2600.0 && a < aTop + 200.0){
           vec3 q = p + vec3(uWindHigh.x, 0.0, uWindHigh.y);
           float h = clamp((a - (aTop - 2600.0))/2800.0, 0.0, 1.0);
           float s = clamp((texture(uShape, q/vec3(20000.0, 6000.0, 20000.0)).g - 0.25)/0.45, 0.0, 1.0);
@@ -134,7 +136,7 @@ export function makeCloudPass(U, noise) {
         }
         // ---- precipitation shafts below the cloud base
         float pr = w2.g;
-        if (pr > 0.02 && a < uLowBase + 200.0){
+        if (uRainCloudsOnly < 0.5 && pr > 0.02 && a < uLowBase + 200.0){
           vec3 q = p + vec3(uWindLow.x, 0.0, uWindLow.y);
           float streak = texture(uShape, vec3(q.x/2500.0, a/30000.0, q.z/2500.0)).g;
           float c = pr * smoothstep(0.25, 0.7, streak) * smoothstep(uLowBase + 200.0, uLowBase - 300.0, a);

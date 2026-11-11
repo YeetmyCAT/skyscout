@@ -325,13 +325,17 @@ export class Immersive {
   }
   // Rain and snow are hidden while the sky straight up is clear (a visual rule only; the weather is unchanged).
   // A tiny copy of the cloud pass looks at the zenith a few times a second and reports how much sky shows through,
-  // so the precipitation returns as soon as a cloud drifts overhead.
+  // so the precipitation returns as soon as a cloud drifts overhead. Only clouds that can make rain or snow count
+  // (stratus, stratocumulus, deeper cumulus, thick altostratus / nimbostratus, storm towers): cirrus and the other high
+  // ice clouds, storm anvils, patchy altocumulus and shallow fair-weather cumulus overhead don't bring it back.
   zenithProbe(now, cam) {
     const pn = this.precipNow;
     if (!pn || pn.type === 'none' || !(pn.rate > 0)) { if (this.precip.clearUp) this.precip.setClearUp(false); return; }
     if (now - (this.zpLast || 0) < 0.3) return;
     this.zpLast = now;
+    this.U.uRainCloudsOnly.value = 1;
     const T = this.cloudT(cam, 0, 1, 0);
+    this.U.uRainCloudsOnly.value = 0;
     this.zenithT = T;
     // a little hysteresis so a ragged cloud edge doesn't flicker the rain on and off
     const clear = this.precip.clearUp ? T > 0.8 : T > 0.85;
