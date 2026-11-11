@@ -194,6 +194,7 @@ function updateFetchButton() {
   clearInterval(fetchTimer);
   const tick = () => {
     const b = $('#fetchBtn'); if (!b) { clearInterval(fetchTimer); return; }
+    if (b.dataset.loading) return;   // a forecast is loading: keep the button disabled and saying so
     const w = RateLimit.waitMs();
     if (w > 0) {
       const sec = Math.ceil(w / 1000), txt = sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.floor(sec % 3600 / 60)} min` : `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
@@ -208,6 +209,8 @@ function updateFetchButton() {
 }
 async function fetchForecast(tok) {
   const { lat, lon } = S.sel, note = $('#fetchNote');
+  if ($('#fetchBtn').dataset.loading) return;
+  $('#fetchBtn').dataset.loading = '1';
   $('#fetchBtn').disabled = true; $('#fetchBtn').textContent = RateLimit.waitMs() > 0 ? 'Loading the backup forecast (MET Norway, US NWS)…' : 'Loading 7 weather models…';
   try {
     const [point, aq] = await Promise.all([pointForecast(lat, lon), airQuality(lat, lon)]);
@@ -216,6 +219,7 @@ async function fetchForecast(tok) {
   } catch (e) {
     console.error(e);
     if (note) note.textContent = e.rateLimited ? 'The free weather service is pausing requests from this device, and the backup forecast could not be reached either.' : `Couldn't load the forecast (${e.message}). ${Net.online ? 'Try again in a moment.' : 'You are offline and nothing is saved for this place yet.'}`;
+    if ($('#fetchBtn')) delete $('#fetchBtn').dataset.loading;
     updateFetchButton();
   }
 }

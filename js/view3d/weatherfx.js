@@ -330,7 +330,7 @@ export class FarStorms {
       if (night && (s.spriteRate ?? 0) > 0.15) {
         if (!s.nextSprite) s.nextSprite = now + 1 + Math.random() * 3;
         if (now > s.nextSprite) {
-          const rate = (spriteMode ? 0.15 : 0.05) * s.spriteRate * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
+          const rate = (spriteMode ? 0.15 : 0.05) * s.strength * Math.max(0.5, Math.min(3, (s.area || 40000) / 40000));
           s.nextSprite = now + (-Math.log(Math.random())) / rate;
           s.flashT = now; s.flashI = 1.6;                      // the parent +CG stroke lights the cloud
           this.spawnSprite(s, now);
