@@ -68,10 +68,8 @@ function setTime(d, from) {
   S.time = d;
   if (from !== 'slider') $('#time').value = Math.round((d - S.t0) / 900e3);
   showTime();
-  // sprite "storms have moved" prompt: checked at once, so nothing slower (or failing) later can hold it back
-  if (S.view && S.view.running) checkSpritePrompt();
   clearTimeout(timeTimer);
-  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) { S.view.setTime(S.time); } }, from === 'slider' ? 60 : 0);
+  timeTimer = setTimeout(() => { if (S.data) { renderNow(); updateCloudOverlay(); } if (S.view && S.view.running) { S.view.setTime(S.time); checkSpritePrompt(); } }, from === 'slider' ? 60 : 0);
   if (S.view && S.view.running && from === 'play') S.view.setTime(S.time);
 }
 
@@ -719,16 +717,12 @@ function openSpriteSpot(r, name) {
   setTime(new Date(r.t * 1000));
   open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config, stormAt: S.spriteRes.stormAt } });
 }
-// Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time. Only at 3, 6, 9 …
-// hours past the now position, as you go forward over each mark; never at or before now. Stepping back over the mark
-// that just popped and forward again does not repeat it.
+// Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
 function checkSpritePrompt() {
   const sv = S.spriteView, res = S.spriteRes; if (!sv || !res || !res.all || !S.view || !S.view.running) return;
-  const t = S.time.getTime() / 1000, H = 3 * 3600;
-  if (sv.now == null) { sv.now = Math.round(Date.now() / 900e3) * 900; sv.L = sv.last = Math.max(0, Math.floor((sv.t0 - sv.now) / H)); }
-  const L = Math.max(0, Math.floor((t - sv.now) / H)), pL = sv.L; sv.L = L;
-  if (L <= pL || L === sv.last) return;
-  sv.last = L;
+  const t = S.time.getTime() / 1000;
+  if (Math.abs(t - sv.t0) < 3 * 3600) return;
+  sv.t0 = t;
   const hourly = res.all.filter(r => Math.abs(r.t - t) <= 1800).sort((a, b) => b.score - a.score);
   let box = $('#spritePrompt');
   if (!box) { box = el('div', { id: 'spritePrompt', class: 'hud card' }); $('#view3d').append(box); }
