@@ -612,7 +612,7 @@ function renderScoutTab() {
   box.dataset.for = `${S.sel.lat},${S.sel.lon}`;
   box.innerHTML = `
     <div class="sub">Starting from <b>${S.sel.name}</b></div>
-    <div class="row"><label>Max drive <select id="scDrive"><option value="0.75">45 min</option><option value="1">1 h</option><option value="1.5" selected>1.5 h</option><option value="2">2 h</option><option value="3">3 h</option><option value="4">4 h</option></select></label>
+    <div class="row"><label>Max drive <select id="scDrive"><option value="0.75">45 min</option><option value="1">1 h</option><option value="1.5" selected>1.5 h</option><option value="2">2 h</option><option value="3">3 h</option><option value="4">4 h</option><option value="5">5 h</option><option value="6">6 h</option><option value="7">7 h</option><option value="8">8 h</option></select></label>
     <label>Night <select id="scNight"><option value="0">Tonight</option><option value="1">Tomorrow</option><option value="2">In 2 nights</option></select></label></div>
     <div class="row"><label>Goal <select id="scGoal"><option value="mw">Milky Way / wide-field</option><option value="deep">Deep-sky imaging</option><option value="land">Nightscape (moon OK)</option><option value="planet">Planets / Moon (seeing)</option></select></label></div>
     <div class="row"><label>Access <select id="scRoad"><option value="road">Right next to a road (no walking)</option><option value="walk">Walk-in spots OK (up to 3 km)</option></select></label></div>
