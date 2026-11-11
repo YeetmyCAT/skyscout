@@ -326,8 +326,9 @@ export class Immersive {
   // Rain and snow are hidden while the sky straight up is clear (a visual rule only; the weather is unchanged).
   // A tiny copy of the cloud pass looks at the zenith a few times a second and reports how much sky shows through,
   // so the precipitation returns as soon as a cloud drifts overhead. Only clouds that can make rain or snow count
-  // (stratus, stratocumulus, deeper cumulus, thick altostratus / nimbostratus, storm towers): cirrus and the other high
-  // ice clouds, storm anvils, patchy altocumulus and shallow fair-weather cumulus overhead don't bring it back.
+  // (stratus, stratocumulus, deeper cumulus, altostratus / nimbostratus, dense dark decks of altocumulus or cumulus,
+  // storm towers): cirrus and the other high ice clouds, storm anvils, and scattered altocumulus or fair-weather cumulus
+  // overhead don't bring it back.
   zenithProbe(now, cam) {
     const pn = this.precipNow;
     if (!pn || pn.type === 'none' || !(pn.rate > 0)) { if (this.precip.clearUp) this.precip.setClearUp(false); return; }

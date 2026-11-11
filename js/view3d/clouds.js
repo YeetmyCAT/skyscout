@@ -53,8 +53,8 @@ export function makeCloudPass(U, noise) {
         float d = 0.0;
         // ---- low layer
         float lowTop = uLowBase + max(w2.b*6000.0, 250.0);
-        // rain-making clouds only: shallow fair-weather cumulus (under ~1 km deep) can't rain
-        bool rainLow = uRainCloudsOnly < 0.5 || w2.r <= 0.5 || w2.b*6000.0 >= 1000.0;
+        // rain-making clouds only: shallow fair-weather cumulus (under ~1 km deep) can't rain, unless packed into a dense deck
+        bool rainLow = uRainCloudsOnly < 0.5 || w2.r <= 0.5 || w2.b*6000.0 >= 1000.0 || w1.r >= 0.65;
         if (rainLow && w1.r > 0.01 && a > uLowBase - 50.0 && a < lowTop + 400.0){
           vec3 q = p + vec3(uWindLow.x, 0.0, uWindLow.y);
           float h = clamp((a - uLowBase)/(lowTop - uLowBase), 0.0, 1.0);
@@ -84,8 +84,8 @@ export function makeCloudPass(U, noise) {
           }
           d += max(c, 0.0) * mix(0.025, 0.06, cu) * mix(0.55 + 0.9*sl.g, 1.0, cu);   // stratus: uneven thickness shows as darker patches
         }
-        // ---- mid layer (rain-making clouds only: thick altostratus / nimbostratus, not patchy altocumulus)
-        if ((uRainCloudsOnly < 0.5 || w1.g > 0.75) && w1.g > 0.01 && a > uMidBase - 200.0 && a < uMidTop + 200.0){
+        // ---- mid layer (rain-making clouds only: altostratus / nimbostratus and dense, dark altocumulus decks, not scattered patches)
+        if ((uRainCloudsOnly < 0.5 || w1.g >= 0.65) && w1.g > 0.01 && a > uMidBase - 200.0 && a < uMidTop + 200.0){
           vec3 q = p + vec3(uWindMid.x, 0.0, uWindMid.y);
           float h = clamp((a - uMidBase)/(uMidTop - uMidBase), 0.0, 1.0);
           float cu = w2.r*0.0 + (w1.g > 0.75 ? 0.15 : 0.7);
