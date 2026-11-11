@@ -201,7 +201,8 @@ function updateFetchButton() {
       b.disabled = false; b.textContent = `Fetch backup forecast (lower quality) · trying the full 7-model forecast again in ${txt}`;
     } else {
       const left = Math.floor(RateLimit.remaining() / POINT_WEIGHT);
-      b.disabled = false; b.textContent = `Fetch forecast · about ${left} left before the free limit`;
+      // under 1 by this device's estimate while the service isn't refusing: it is still accepting, so don't say 0
+      b.disabled = false; b.textContent = left >= 1 ? `Fetch forecast · about ${left} left before the free limit` : 'Fetch forecast · close to the free limit, still available';
       const c = $('#fetchCost'); if (c) c.textContent = 'Counted on this device. Opening the 3D view uses about 8 of these and a Best spots search about 8–10.';
     }
   };

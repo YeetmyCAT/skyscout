@@ -104,11 +104,23 @@ export const RateLimit = {
       return locs * Math.max(1, nv / 10) * Math.max(1, days / 14);
     } catch { return 1; }
   },
-  record(url) { this.load(); this.log.push([Date.now(), this.weight(url)]); this.save(); },   // reload first: other tabs share the log
+  record(url) {   // reload first: other tabs share the log
+    this.load(); const t = Date.now(), w = this.weight(url);
+    // the service just accepted this request, so it can't have been over a limit: if this device's estimate says it
+    // was, the estimate is too high, so forget the oldest entries in that window until the request fits
+    for (const [win, cap] of this.limits) {
+      const from = this.windowStart(win, t);
+      let used = this.log.filter(e => e[0] >= from).reduce((a, e) => a + e[1], 0);
+      while (used + w > cap) { const i = this.log.findIndex(e => e[0] >= from); if (i < 0) break; used -= this.log[i][1]; this.log.splice(i, 1); }
+    }
+    this.log.push([t, w]); this.save();
+  },
+  // the minute and hour limits reset on the clock (as blocked() assumes); the daily one is a rolling 24 h
+  windowStart(win, t) { return win < 864e5 ? Math.floor(t / win) * win : t - win; },
   // what's left in the hourly and daily windows (the minute window refills within a minute)
   remaining(includeMinute = false) {
     const t = Date.now(); let r = Infinity;
-    for (const [win, cap] of this.limits) { if (win < 3600e3 && !includeMinute) continue; r = Math.min(r, cap - this.log.filter(e => t - e[0] < win).reduce((a, e) => a + e[1], 0)); }
+    for (const [win, cap] of this.limits) { if (win < 3600e3 && !includeMinute) continue; const from = this.windowStart(win, t); r = Math.min(r, cap - this.log.filter(e => e[0] >= from).reduce((a, e) => a + e[1], 0)); }
     return Math.max(0, r);
   },
   // the service said no: block until its window resets
