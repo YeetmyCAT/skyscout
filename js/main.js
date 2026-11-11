@@ -722,12 +722,28 @@ function openSpriteSpot(r, name) {
   open3D({ lat: r.p[0], lon: r.p[1], name, lookAz: r.bearing, lookAlt: r.spriteAlt * 0.6, spriteData: { stormsByHour: S.spriteRes.stormsByHour, config: S.spriteRes.config, stormAt: S.spriteRes.stormAt } });
 }
 // Every 3 hours of forecast time the storms have moved: suggest the best viewing spot for the new time.
+// The pop-up stays closed while you are at the best sprite spot for the time shown, closes by itself when you move the
+// time to where this spot is the best again, and opens again by itself when it stops being so (storms moved, a better
+// spot, or no good spot).
 function checkSpritePrompt() {
   const sv = S.spriteView, res = S.spriteRes; if (!sv || !res || !res.all || !S.view || !S.view.running) return;
   const t = S.time.getTime() / 1000;
-  if (Math.abs(t - sv.t0) < 3 * 3600) return;
-  sv.t0 = t;
   const hourly = res.all.filter(r => Math.abs(r.t - t) <= 1800).sort((a, b) => b.score - a.score);
+  // this spot is the best (or as good as the best) for this time
+  const c = S.view.ctx, here = hourly.filter(r => haversine(c.lat, c.lon, r.p[0], r.p[1]) < 30000);
+  const atBest = hourly.length > 0 && here.length > 0 && here[0].score >= hourly[0].score * 0.95;
+  const box0 = $('#spritePrompt'), shown = box0 && !box0.classList.contains('hidden');
+  if (Math.abs(t - sv.t0) < 3 * 3600) {
+    if (shown && atBest) { box0.classList.add('hidden'); sv.auto = true; }
+    else if (!shown && sv.auto && !atBest) { sv.auto = false; showSpritePrompt(t, hourly); }
+    return;
+  }
+  sv.t0 = t;
+  if (atBest) { if (shown) box0.classList.add('hidden'); sv.auto = true; return; }
+  sv.auto = false;
+  showSpritePrompt(t, hourly);
+}
+function showSpritePrompt(t, hourly) {
   let box = $('#spritePrompt');
   if (!box) { box = el('div', { id: 'spritePrompt', class: 'hud card' }); $('#view3d').append(box); }
   if (!hourly.length) { box.innerHTML = `<b>Storms have moved</b><div class="small">No good sprite viewing spot is forecast for ${fmtDT(S.time, tz())}.</div><div class="row"><button class="btn" id="spOk">OK</button></div>`; }
